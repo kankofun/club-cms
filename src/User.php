@@ -20,7 +20,8 @@ class User {
                 'name' => '初期管理者', 'role' => 'admin', 'password_hash' => $adminPass,
                 'totp_secret' => null, 'is_2fa_enabled' => false, 'backup_codes' => [], 
                 'email_verify_code' => null, 'email_verify_expires' => null,
-                'is_locked' => false, 'created_at' => date('Y-m-d H:i:s')
+                'is_locked' => false, 'created_at' => date('Y-m-d H:i:s'),
+                'trusted_devices' => [] // ★デバイス記憶用
             ];
             $this->db->write(self::FILE, $users);
         }
@@ -56,10 +57,12 @@ class User {
             $data['email_verify_code'] = null;
             $data['email_verify_expires'] = null;
             $data['is_locked'] = false;
+            $data['trusted_devices'] = [];
             $users[] = $data;
         } else {
             foreach ($users as $key => $user) {
                 if ($user['id'] === $data['id']) {
+                    if (!isset($data['trusted_devices'])) $data['trusted_devices'] = $user['trusted_devices'] ?? [];
                     $users[$key] = array_merge($user, $data);
                     break;
                 }
