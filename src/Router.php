@@ -59,18 +59,15 @@ class Router {
         @file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
     }
 
-    // ★ 強化された変数置換エンジン
     private function replaceVariables($text, $baseUrl) {
         if (!is_string($text) || $text === '') return '';
         $settings = $this->getSettings();
         $dateField = $settings['blog_date_type'] ?? 'updated_at';
         $categories = $this->contentModel->getCategories();
         
-        // 現在のURLパスを取得して、絞り込み時のリンク先にする
         $currentUrlPath = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
         $actionUrl = htmlspecialchars($currentUrlPath);
 
-        // 1. カスタム変数の置換
         $rawVars = $settings['variables'] ?? '';
         $lines = explode("\n", $rawVars);
         foreach($lines as $line) {
@@ -80,7 +77,6 @@ class Router {
             $text = str_replace('{{' . trim($k) . '}}', trim($v), $text);
         }
 
-        // 2. 検索フォーム置換 (actionを現在のURLにする)
         if (strpos($text, '{{blog_search_form}}') !== false) {
             $formHtml = "<form action='{$actionUrl}' method='GET' style='display:flex;gap:5px;margin-bottom:15px;'><input type='text' name='q' placeholder='ブログを検索...' required style='padding:5px; flex:1;'><button type='submit' style='padding:5px 10px;cursor:pointer;'>検索</button></form>";
             $text = str_replace('{{blog_search_form}}', $formHtml, $text);
@@ -94,7 +90,6 @@ class Router {
             }
         }
 
-        // 3. 各種リスト機能
         if (strpos($text, '{{blog_categories}}') !== false) {
             if (!empty($settings['blog_category_enabled'])) {
                 $html = "<ul class='blog-categories-list' style='list-style:none; padding:0;'>";
@@ -135,11 +130,9 @@ class Router {
             $text = str_replace('{{blog_archives}}', $html, $text);
         }
 
-        // 旧互換
         $text = str_replace('{{latest_blogs}}', '{{blogs limit=5}}', $text);
         $text = preg_replace('/\{\{latest_blogs_(\d+)\}\}/', '{{blogs limit=$1}}', $text);
 
-        // ★ 完全再現用のメインリストショートコード
         if (strpos($text, '{{blog_main_list}}') !== false) {
             $q = trim($_GET['q'] ?? '');
             $catId = trim($_GET['category'] ?? '');
@@ -262,7 +255,6 @@ class Router {
             $text = str_replace('{{blog_main_list}}', $html, $text);
         }
 
-        // 5. カスタム可能なブログリスト展開: {{blogs limit=5 category=xxx tag=yyy order=desc sort=date archive=true}}
         $text = preg_replace_callback('/\{\{blogs\s*(.*?)\}\}/', function($m) use ($baseUrl, $settings, $dateField, $categories, $actionUrl) {
             $attrStr = trim($m[1]);
             $args = [];
@@ -355,11 +347,12 @@ class Router {
         return $text;
     }
 
-    private function injectHeadTags($html, $pageMetaDesc = '', $pageTitle = '', $canonicalUrl = '') {
+    // ★ カスタムHeadの挿入
+    private function injectHeadTags($html, $pageMetaDesc = '', $pageTitle = '', $canonicalUrl = '', $customHead = '') {
         $settings = $this->getSettings();
         $defaultDesc = $settings['seo_description'] ?? '';
         $keywords = $settings['seo_keywords'] ?? '';
-        $customHead = $settings['custom_head'] ?? '';
+        $globalCustomHead = $settings['custom_head'] ?? '';
 
         $desc = trim($pageMetaDesc) !== '' ? trim($pageMetaDesc) : trim($defaultDesc);
         $tags = "";
@@ -373,18 +366,11 @@ class Router {
             }
         }
 
-        if ($canonicalUrl !== '') {
-            $tags .= "<link rel=\"canonical\" href=\"" . htmlspecialchars($canonicalUrl) . "\">\n";
-        }
-        if ($desc !== '') {
-            $tags .= "<meta name=\"description\" content=\"" . htmlspecialchars($desc) . "\">\n";
-        }
-        if (trim($keywords) !== '') {
-            $tags .= "<meta name=\"keywords\" content=\"" . htmlspecialchars(trim($keywords)) . "\">\n";
-        }
-        if (trim($customHead) !== '') {
-            $tags .= trim($customHead) . "\n";
-        }
+        if ($canonicalUrl !== '') $tags .= "<link rel=\"canonical\" href=\"" . htmlspecialchars($canonicalUrl) . "\">\n";
+        if ($desc !== '') $tags .= "<meta name=\"description\" content=\"" . htmlspecialchars($desc) . "\">\n";
+        if (trim($keywords) !== '') $tags .= "<meta name=\"keywords\" content=\"" . htmlspecialchars(trim($keywords)) . "\">\n";
+        if (trim($globalCustomHead) !== '') $tags .= trim($globalCustomHead) . "\n";
+        if (trim($customHead) !== '') $tags .= trim($customHead) . "\n";
 
         if ($tags !== "") {
             if (stripos($html, '</head>') !== false) {
@@ -396,16 +382,24 @@ class Router {
         return $html;
     }
 
+    // ★ エラーページ表示時にもカスタムタグやカスタムBottomを適用
     private function renderErrorPage($code, $baseUrl, $defaultMessage, $adminHead = null) {
         http_response_code($code);
         $errorPage = $this->contentModel->getBySlug((string)$code, 'page');
         if ($errorPage) {
             $header = $this->templateModel->renderHeader($baseUrl);
-            $header = $this->injectHeadTags($header, $errorPage['meta_description'] ?? '', $errorPage['title'] ?? "{$code} Error");
+            $header = $this->injectHeadTags($header, $errorPage['meta_description'] ?? '', $errorPage['title'] ?? "{$code} Error", '', $errorPage['custom_head'] ?? '');
             $header = $this->replaceVariables($header, $baseUrl);
             echo $header;
             echo "<main>" . $this->replaceVariables($errorPage['body'], $baseUrl) . "</main>";
             $footer = $this->templateModel->renderFooter();
+            if (!empty($errorPage['custom_bottom'])) {
+                if (stripos($footer, '</body>') !== false) {
+                    $footer = str_ireplace('</body>', $errorPage['custom_bottom'] . "\n</body>", $footer);
+                } else {
+                    $footer .= "\n" . $errorPage['custom_bottom'];
+                }
+            }
             echo $this->replaceVariables($footer, $baseUrl);
         } else {
             if ($adminHead) echo $adminHead . "<h1>{$code} Error</h1><p>{$defaultMessage}</p></main></body></html>";
@@ -547,12 +541,26 @@ HTML;
         if ($cleanPath === 'index' || $isHome) {
             $indexPage = $this->contentModel->getBySlug('index', 'page');
             if ($indexPage) {
+                // ★ リダイレクト処理
+                if (!empty($indexPage['redirect_url'])) {
+                    header("Location: " . $indexPage['redirect_url'], true, 301);
+                    exit;
+                }
+                
                 $header = $this->templateModel->renderHeader($baseUrl);
-                $header = $this->injectHeadTags($header, $indexPage['meta_description'] ?? '', $indexPage['title'] ?? '', $canonicalUrl);
+                $header = $this->injectHeadTags($header, $indexPage['meta_description'] ?? '', $indexPage['title'] ?? '', $canonicalUrl, $indexPage['custom_head'] ?? '');
                 $header = $this->replaceVariables($header, $baseUrl);
                 echo $header;
                 echo "<main>" . $this->replaceVariables($indexPage['body'], $baseUrl) . "</main>";
+                
                 $footer = $this->templateModel->renderFooter();
+                if (!empty($indexPage['custom_bottom'])) {
+                    if (stripos($footer, '</body>') !== false) {
+                        $footer = str_ireplace('</body>', $indexPage['custom_bottom'] . "\n</body>", $footer);
+                    } else {
+                        $footer .= "\n" . $indexPage['custom_bottom'];
+                    }
+                }
                 echo $this->replaceVariables($footer, $baseUrl);
                 return;
             }
@@ -648,7 +656,6 @@ HTML;
             return;
         }
 
-        // ★ 古い「/blogs」への直接アクセスがあった場合は {{blog_main_list}} で代用する
         if ($cleanPath === 'blogs') {
             $header = $this->templateModel->renderHeader($baseUrl);
             $header = $this->injectHeadTags($header, '', 'ブログ一覧', $canonicalUrl); 
@@ -664,9 +671,9 @@ HTML;
 .blog-categories-list, .blog-archives-list { list-style:none; padding:0 !important; margin:0 !important; }
 .blog-tags-list { display:flex !important; flex-wrap:wrap !important; gap:5px !important; }
 </style>
-<main class="blogs-layout">
+<div class="blogs-layout">
   <div class="blogs-main">
-    <h1 style="margin-bottom:20px;">ブログ一覧</h1>
+    <h1 style="margin-bottom:20px; margin-top:0;">ブログ一覧</h1>
     {{blog_main_list}}
   </div>
   <aside class="blogs-side">
@@ -675,9 +682,9 @@ HTML;
     <div class="side-card"><h3 style="margin-top:0;">タグ</h3>{{blog_tags}}</div>
     <div class="side-card"><h3 style="margin-top:0;">月別アーカイブ</h3>{{blog_archives}}</div>
   </aside>
-</main>
+</div>
 HTML;
-            echo $this->replaceVariables($layout, $baseUrl);
+            echo "<main>" . $this->replaceVariables($layout, $baseUrl) . "</main>";
             $footer = $this->templateModel->renderFooter();
             echo $this->replaceVariables($footer, $baseUrl);
             return;
@@ -1983,6 +1990,7 @@ HTML;
 
             if ($isAdminOrSpecial) {
                 echo "<section><h2 id='pages-title'>サイト構造（通常ページ）</h2>";
+                echo "<p style='font-size:0.9em;color:#666;margin-top:-10px;'>※スラッグを <code>404</code> や <code>403</code> などのステータスコードにすると、システムのエラーページとして自動的に使われます。</p>";
                 echo "<a href='{$baseUrl}cms/contents/edit?type=page' class='btn'>+ 通常ページを新規作成</a><br><br>";
                 usort($pages, function($a, $b) { return strcmp($a['slug'] ?? '', $b['slug'] ?? ''); });
                 echo "<table><thead><tr><th>ページ階層 (URL)</th><th>タイトル</th><th>操作</th></tr></thead><tbody>";
@@ -2023,7 +2031,11 @@ HTML;
         if ($path === 'cms/contents/edit') {
             $id = $_GET['id'] ?? '';
             $requestedType = $_GET['type'] ?? 'blog';
-            $formData = ['id' => '', 'title' => '', 'slug' => '', 'type' => $requestedType, 'body' => '', 'meta_description' => '', 'version' => 1, 'author_id' => $currentUser['id'], 'slash_policy' => 'default'];
+            $formData = [
+                'id' => '', 'title' => '', 'slug' => '', 'type' => $requestedType, 'body' => '', 
+                'meta_description' => '', 'version' => 1, 'author_id' => $currentUser['id'], 
+                'slash_policy' => 'default', 'redirect_url' => '', 'custom_head' => '', 'custom_bottom' => ''
+            ];
             $error = '';
             
             if ($method !== 'POST') {
@@ -2146,7 +2158,13 @@ HTML;
                 echo "<option value='as_is' ".(($formData['slash_policy'] === 'as_is')?'selected':'').">統一しない (どちらでもOK)</option>";
                 echo "</select>";
 
+                echo "<label>リダイレクト先URL (アクセス時に自動転送する場合)</label><input type='text' name='redirect_url' value='".htmlspecialchars($formData['redirect_url'] ?? '')."' placeholder='例: https://example.com/ または /new-page'>";
+
                 echo "<label>Meta Description (任意)</label><textarea name='meta_description' style='height:80px;'>".htmlspecialchars($formData['meta_description'] ?? '')."</textarea>";
+
+                echo "<label>カスタムHeadタグ (このページのみの&lt;head&gt;内追加)</label><textarea name='custom_head' style='height:80px; font-family:monospace;' placeholder='&lt;link rel=\"stylesheet\" href=\"...\"&gt; や &lt;script src=\"...\"&gt;&lt;/script&gt; など'>".htmlspecialchars($formData['custom_head'] ?? '')."</textarea>";
+
+                echo "<label>カスタムBody末尾タグ (このページのみの&lt;/body&gt;直前追加)</label><textarea name='custom_bottom' style='height:80px; font-family:monospace;' placeholder='&lt;script&gt;...&lt;/script&gt; など'>".htmlspecialchars($formData['custom_bottom'] ?? '')."</textarea>";
             } else {
                 if ($isAdminOrSpecial) echo "<label>URLスラッグ (任意)</label><input type='text' name='slug' value='".htmlspecialchars($formData['slug'] ?? '')."'>";
                 else echo "<input type='hidden' name='slug' value='".htmlspecialchars($formData['slug'] ?? '')."'>";
@@ -2305,12 +2323,24 @@ JS;
         // 4. キャッチオール：静的サイト風の通常ページ出力
         // ==========================================
         if ($pageArticle ?? false) {
+            if (!empty($pageArticle['redirect_url'])) {
+                header("Location: " . $pageArticle['redirect_url'], true, 301);
+                exit;
+            }
             $header = $this->templateModel->renderHeader($baseUrl);
-            $header = $this->injectHeadTags($header, $pageArticle['meta_description'] ?? '', $pageArticle['title'] ?? '', $canonicalUrl);
+            $header = $this->injectHeadTags($header, $pageArticle['meta_description'] ?? '', $pageArticle['title'] ?? '', $canonicalUrl, $pageArticle['custom_head'] ?? '');
             $header = $this->replaceVariables($header, $baseUrl);
             echo $header;
             echo "<main>" . $this->replaceVariables($pageArticle['body'], $baseUrl) . "</main>";
+            
             $footer = $this->templateModel->renderFooter();
+            if (!empty($pageArticle['custom_bottom'])) {
+                if (stripos($footer, '</body>') !== false) {
+                    $footer = str_ireplace('</body>', $pageArticle['custom_bottom'] . "\n</body>", $footer);
+                } else {
+                    $footer .= "\n" . $pageArticle['custom_bottom'];
+                }
+            }
             echo $this->replaceVariables($footer, $baseUrl);
             return;
         }
