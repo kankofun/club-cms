@@ -347,7 +347,6 @@ class Router {
         return $text;
     }
 
-    // ★ カスタムHeadの挿入
     private function injectHeadTags($html, $pageMetaDesc = '', $pageTitle = '', $canonicalUrl = '', $customHead = '') {
         $settings = $this->getSettings();
         $defaultDesc = $settings['seo_description'] ?? '';
@@ -382,7 +381,6 @@ class Router {
         return $html;
     }
 
-    // ★ エラーページ表示時にもカスタムタグやカスタムBottomを適用
     private function renderErrorPage($code, $baseUrl, $defaultMessage, $adminHead = null) {
         http_response_code($code);
         $errorPage = $this->contentModel->getBySlug((string)$code, 'page');
@@ -408,7 +406,18 @@ class Router {
         exit;
     }
 
-    private function processSuccessfulLogin($user, $baseUrl) {
+    private function processSuccessfulLogin($user, $baseUrl, $settings) {
+        // ★ トラストデバイス（Cookie記憶）の登録処理
+        $trustDays = (int)($settings['2fa_trust_days'] ?? 0);
+        if ($trustDays > 0 && !empty($_POST['trust_device'])) {
+            $token = bin2hex(random_bytes(32));
+            $expires = time() + (86400 * $trustDays);
+            setcookie('cms_2fa_trust_' . $user['id'], $token, $expires, '/', '', false, true);
+            $user['trusted_devices'] = $user['trusted_devices'] ?? [];
+            $user['trusted_devices'][] = ['token' => password_hash($token, PASSWORD_DEFAULT), 'expires' => $expires];
+            $this->userModel->save($user);
+        }
+
         $this->auth->completeLogin($user);
         if (isset($_SESSION['expired_user_id']) && $_SESSION['expired_user_id'] !== $user['id']) unset($_SESSION['recovery_post']);
         unset($_SESSION['expired_user_id']);
@@ -475,9 +484,6 @@ HTML;
         $settings = $this->getSettings();
         $dateField = $settings['blog_date_type'] ?? 'updated_at';
 
-        // ==========================================
-        // ルーティング・末尾スラッシュ・Canonical
-        // ==========================================
         $requestUriPath = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
         $hasTrailingSlash = (substr($requestUriPath, -1) === '/');
         $isHome = ($requestUriPath === '/' || rtrim($requestUriPath, '/') === rtrim($baseUrl, '/'));
@@ -529,7 +535,6 @@ HTML;
             }
         }
 
-        // 動的アセット
         if ($path === 'assets/style.css') {
             header('Content-Type: text/css; charset=utf-8');
             echo $this->replaceVariables($this->templateModel->get('style.css'), $baseUrl); return;
@@ -541,7 +546,6 @@ HTML;
         if ($cleanPath === 'index' || $isHome) {
             $indexPage = $this->contentModel->getBySlug('index', 'page');
             if ($indexPage) {
-                // ★ リダイレクト処理
                 if (!empty($indexPage['redirect_url'])) {
                     header("Location: " . $indexPage['redirect_url'], true, 301);
                     exit;
@@ -811,7 +815,7 @@ HTML;
                 if ($loginResult === true) { 
                     $this->writeLog($this->auth->getCurrentUser(), 'Login', 'Success');
                     $user = $this->userModel->findByStudentId($_POST['student_id']);
-                    $this->processSuccessfulLogin($user, $baseUrl);
+                    $this->processSuccessfulLogin($user, $baseUrl, $settings);
                 } elseif ($loginResult === 'requires_totp') {
                     header("Location: {$baseUrl}login/totp"); exit;
                 } elseif ($loginResult === 'requires_email') {
@@ -889,7 +893,7 @@ HTML;
 
                     if ($verified) {
                         $this->writeLog($user, '2FA TOTP Login', 'Success');
-                        $this->processSuccessfulLogin($user, $baseUrl);
+                        $this->processSuccessfulLogin($user, $baseUrl, $settings);
                     } else {
                         $error = "認証コードまたはバックアップコードが正しくありません。";
                     }
@@ -900,6 +904,12 @@ HTML;
             if ($error) echo "<p role='alert' style='color:red;'>$error</p>";
             echo "<p>認証アプリの6桁のコード、またはバックアップコードを入力してください。</p>";
             echo "<input type='text' name='code' required autocomplete='off' style='width:100%;margin-bottom:15px;padding:8px;font-size:1.2em;text-align:center;letter-spacing:2px;'><br>";
+            
+            if (!empty($settings['2fa_trust_days'])) {
+                $days = (int)$settings['2fa_trust_days'];
+                echo "<label style='display:block;margin-bottom:15px;color:#555;'><input type='checkbox' name='trust_device' value='1'> このデバイスを {$days} 日間記憶する</label>";
+            }
+
             echo "<button type='submit' style='width:100%;padding:10px;background:#0056b3;color:#fff;border:none;border-radius:4px;'>認証する</button>";
             echo "</fieldset></form>";
             
@@ -924,11 +934,13 @@ HTML;
                     
                     $mode = $settings['2fa_mode'] ?? 'none';
                     if ($mode === 'email_totp_required' && empty($user['totp_secret'])) {
+                        // 強制TOTPセットアップへ進む際に、信頼デバイスのチェック状態をセッションに保持
                         $_SESSION['setup_totp_allowed'] = true;
+                        $_SESSION['pending_trust_device'] = !empty($_POST['trust_device']);
                         header("Location: {$baseUrl}login/setup_totp"); exit;
                     } else {
                         $this->writeLog($user, '2FA Email Login', 'Success');
-                        $this->processSuccessfulLogin($user, $baseUrl);
+                        $this->processSuccessfulLogin($user, $baseUrl, $settings);
                     }
                 } else {
                     $error = "確認コードが正しくありません。";
@@ -939,6 +951,12 @@ HTML;
             if ($error) echo "<p role='alert' style='color:red;'>$error</p>";
             echo "<p>登録メールアドレスに送信された6桁の確認コードを入力してください。</p>";
             echo "<input type='text' name='code' required autocomplete='off' style='width:100%;margin-bottom:15px;padding:8px;font-size:1.2em;text-align:center;letter-spacing:2px;'><br>";
+            
+            if (!empty($settings['2fa_trust_days'])) {
+                $days = (int)$settings['2fa_trust_days'];
+                echo "<label style='display:block;margin-bottom:15px;color:#555;'><input type='checkbox' name='trust_device' value='1'> このデバイスを {$days} 日間記憶する</label>";
+            }
+
             echo "<button type='submit' style='width:100%;padding:10px;background:#0056b3;color:#fff;border:none;border-radius:4px;'>認証して次へ</button>";
             echo "</fieldset></form><p style='text-align:center;margin-top:20px;'><a href='{$baseUrl}login'>キャンセルして戻る</a></p></main></body></html>";
             return;
@@ -974,7 +992,24 @@ HTML;
                     
                     $_SESSION['flash_backup_codes'] = $bCodes;
                     
+                    // Email画面で「記憶する」にチェックを入れていた場合を考慮
+                    if (!empty($_SESSION['pending_trust_device'])) {
+                        $_POST['trust_device'] = 1;
+                        unset($_SESSION['pending_trust_device']);
+                    }
+                    
                     $this->auth->completeLogin($user);
+                    
+                    $trustDays = (int)($settings['2fa_trust_days'] ?? 0);
+                    if ($trustDays > 0 && !empty($_POST['trust_device'])) {
+                        $token = bin2hex(random_bytes(32));
+                        $expires = time() + (86400 * $trustDays);
+                        setcookie('cms_2fa_trust_' . $user['id'], $token, $expires, '/', '', false, true);
+                        $user['trusted_devices'] = $user['trusted_devices'] ?? [];
+                        $user['trusted_devices'][] = ['token' => password_hash($token, PASSWORD_DEFAULT), 'expires' => $expires];
+                        $this->userModel->save($user);
+                    }
+
                     if (isset($_SESSION['expired_user_id']) && $_SESSION['expired_user_id'] !== $user['id']) unset($_SESSION['recovery_post']);
                     unset($_SESSION['expired_user_id']);
                     
@@ -1112,6 +1147,7 @@ HTML;
                     }
                     if (!$err) {
                         $settings['2fa_mode'] = $_POST['2fa_mode'];
+                        $settings['2fa_trust_days'] = (int)($_POST['2fa_trust_days'] ?? 0);
                         $this->saveSettings($settings);
                         $msg = "二段階認証の設定を保存しました。";
                     }
@@ -1146,7 +1182,14 @@ HTML;
             echo "<label><input type='radio' name='2fa_mode' value='email' ".($mode==='email'?'checked':'')."> メール認証のみ（必須）</label><br>";
             echo "<label><input type='radio' name='2fa_mode' value='email_totp_optional' ".($mode==='email_totp_optional'?'checked':'')."> メール認証 ＋ TOTP（任意）</label><br>";
             echo "<label><input type='radio' name='2fa_mode' value='email_totp_required' ".($mode==='email_totp_required'?'checked':'')."> メール認証 ＋ TOTP（必須）</label>";
-            echo "</fieldset><button type='submit' class='btn'>設定を保存</button></form><hr>";
+            echo "</fieldset>";
+            
+            echo "<fieldset><legend>■ 信頼されたデバイス (2FAのスキップ)</legend>";
+            echo "<label>デバイスを記憶する日数: <input type='number' name='2fa_trust_days' value='".htmlspecialchars($settings['2fa_trust_days'] ?? 0)."' min='0' max='365' style='width:100px;display:inline-block;'></label>";
+            echo "<p style='font-size:0.9em;color:#666;'>※0を指定するとこの機能を無効にします（常に2FAが要求されます）。</p>";
+            echo "</fieldset>";
+
+            echo "<button type='submit' class='btn'>設定を保存</button></form><hr>";
 
             echo "<h2>ユーザー別 TOTP 管理</h2><table><thead><tr><th>ユーザー名</th><th>メールアドレス</th><th>TOTP 状態</th><th>操作</th></tr></thead><tbody>";
             $users = $this->userModel->getAll();
@@ -1359,7 +1402,7 @@ HTML;
                 if ($err) echo "<div class='alert alert-error'>$err</div>";
                 echo "<ol><li>認証アプリ（Google Authenticator等）を準備してください</li>";
                 echo "<li>以下のQRコードを読み取ってください<br><div id='qrcode' style='margin:15px 0;'></div></li>";
-                echo "<li>手動入力キー（必要な場合）: <strong>{$secret}</strong></li></ol>";
+                echo "<li>手動入力キー: <strong>{$secret}</strong></li></ol>";
                 echo "<h3>認証コードの確認</h3><p>アプリに表示された6桁のコードを入力してください。</p>";
                 echo "<form method='POST'><label>認証コード: <input type='text' name='code' required></label><button type='submit' class='btn'>設定を完了する</button></form>";
                 echo "<script src='https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js'></script>";
@@ -1537,9 +1580,11 @@ HTML;
             if ($method === 'POST' && !empty($_POST['batch_action']) && !empty($_POST['user_ids'])) {
                 $action = $_POST['batch_action'];
                 foreach ($_POST['user_ids'] as $targetId) {
+                    // ★ 自己降格の阻止を追加
                     if ($targetId === $currentUser['id']) {
                         if ($action === 'delete') { $batchMessage = "※ログイン中の自分自身は削除から除外されました。"; continue; }
                         if ($action === 'lock') { $batchMessage = "※ログイン中の自分自身は一時停止できません。"; continue; }
+                        if (in_array($action, ['special', 'general'])) { $batchMessage = "※自分自身の権限を降格させることはできません。"; continue; }
                     }
                     if ($action === 'delete') $this->userModel->delete($targetId);
                     elseif (in_array($action, ['admin', 'special', 'general'])) { $u = $this->userModel->findById($targetId); if ($u) { $u['role'] = $action; $this->userModel->save($u); } }
@@ -1597,16 +1642,21 @@ HTML;
                     if ($existingUser && $existingUser['id'] !== $id) {
                         $error = 'この学籍番号/IDは既に登録されています。';
                     } else {
-                        if (!empty($_POST['password'])) {
-                            $formData['password_hash'] = password_hash($_POST['password'], PASSWORD_DEFAULT);
-                        }
-                        unset($formData['password']); 
-
-                        if ($this->userModel->save($formData)) {
-                            $this->writeLog($currentUser, 'User Saved', "User ID: {$student_id}");
-                            header("Location: {$baseUrl}cms/users"); exit;
+                        // ★ 自己降格の阻止を追加
+                        if ($id === $currentUser['id'] && $formData['role'] !== 'admin') {
+                            $error = '自分自身の権限を降格させることはできません。';
                         } else {
-                            $error = '保存に失敗しました。';
+                            if (!empty($_POST['password'])) {
+                                $formData['password_hash'] = password_hash($_POST['password'], PASSWORD_DEFAULT);
+                            }
+                            unset($formData['password']); 
+
+                            if ($this->userModel->save($formData)) {
+                                $this->writeLog($currentUser, 'User Saved', "User ID: {$student_id}");
+                                header("Location: {$baseUrl}cms/users"); exit;
+                            } else {
+                                $error = '保存に失敗しました。';
+                            }
                         }
                     }
                 }
@@ -1836,6 +1886,9 @@ HTML;
                     $newSettings['blog_latest_count'] = (int)($_POST['blog_latest_count'] ?? 5);
                     $newSettings['site_search_enabled'] = !empty($_POST['site_search_enabled']);
                     $newSettings['blog_date_type'] = $_POST['blog_date_type'] ?? 'updated_at';
+                    
+                    // ★ 一般ユーザーのメアド変更許可設定
+                    $newSettings['allow_user_email_change'] = !empty($_POST['allow_user_email_change']);
                 }
                 
                 $this->saveSettings($newSettings);
@@ -1851,6 +1904,7 @@ HTML;
             if ($currentUser['role'] === 'admin') {
                 echo "<fieldset><legend>ブログ・全体機能拡張 (管理者のみ)</legend>";
                 echo "<label><input type='checkbox' name='site_search_enabled' value='1' ".(!empty($settings['site_search_enabled'])?'checked':'')."> サイト内全体検索機能を有効にする</label><br><br>";
+                echo "<label><input type='checkbox' name='allow_user_email_change' value='1' ".(!empty($settings['allow_user_email_change'])?'checked':'')."> 一般ユーザーによる自身のメールアドレス変更を許可する</label><br><br>";
                 echo "<label><input type='checkbox' name='blog_category_enabled' value='1' ".(!empty($settings['blog_category_enabled'])?'checked':'')."> カテゴリ機能を有効にする</label><br>";
                 echo "<label><input type='checkbox' name='blog_category_required' value='1' ".(!empty($settings['blog_category_required'])?'checked':'')."> 記事作成時にカテゴリ付けを必須にする</label><br><br>";
                 echo "<label><input type='checkbox' name='blog_tag_enabled' value='1' ".(!empty($settings['blog_tag_enabled'])?'checked':'')."> タグ機能を有効にする</label><br><br>";
@@ -1932,38 +1986,66 @@ HTML;
         }
 
         // ==========================================
-        // プロフィール設定・記事管理等
+        // プロフィール設定 (メアド変更の追加)
         // ==========================================
         if ($path === 'cms/profile') {
             $message = ''; $error = '';
+            $allowEmailChange = !empty($settings['allow_user_email_change']);
+            $userProfile = $this->userModel->findById($currentUser['id']);
+
             if ($method === 'POST') {
                 $currentPass = $_POST['current_password'] ?? '';
                 $newPass = $_POST['new_password'] ?? '';
                 $newPassConf = $_POST['new_password_confirm'] ?? '';
+                $newEmail = trim($_POST['email'] ?? '');
 
                 $isCurrentPassValid = false;
                 $backupSession = $_SESSION; 
                 if ($this->auth->login($currentUser['student_id'], $currentPass) === true) $isCurrentPassValid = true;
                 $_SESSION = $backupSession;
 
-                if (!$isCurrentPassValid) $error = "現在のパスワードが間違っています。";
-                elseif ($newPass !== $newPassConf) $error = "新しいパスワードと確認用パスワードが一致しません。";
-                elseif (strlen($newPass) < 4) $error = "パスワードは短すぎます（4文字以上推奨）。";
-                else {
-                    $this->userModel->changePassword($currentUser['id'], $newPass);
-                    $this->writeLog($currentUser, 'Profile Updated', 'パスワードを変更しました');
-                    $message = "パスワードを安全に変更しました。";
+                if (!$isCurrentPassValid) {
+                    $error = "現在のパスワードが間違っています。";
+                } elseif ($newPass !== '' && $newPass !== $newPassConf) {
+                    $error = "新しいパスワードと確認用パスワードが一致しません。";
+                } elseif ($newPass !== '' && strlen($newPass) < 4) {
+                    $error = "パスワードは短すぎます（4文字以上推奨）。";
+                } else {
+                    if ($newPass !== '') {
+                        $this->userModel->changePassword($currentUser['id'], $newPass);
+                    }
+                    if ($allowEmailChange && $newEmail !== $userProfile['email']) {
+                        $userProfile['email'] = $newEmail;
+                        $this->userModel->save($userProfile);
+                    }
+                    
+                    $this->writeLog($currentUser, 'Profile Updated', 'プロフィールを変更しました');
+                    $message = "プロフィールを安全に変更しました。";
                 }
             }
             
             echo $adminHead . "<h1>プロフィール設定</h1>";
             if ($message) echo "<div class='alert' role='alert'>$message</div>";
             if ($error) echo "<div class='alert alert-error' role='alert'>$error</div>";
-            echo "<form method='POST'><fieldset><legend>パスワードの変更</legend>";
-            echo "<label for='current_password'>現在のパスワード <span style='color:red;'>*</span></label><input type='password' id='current_password' name='current_password' required>";
-            echo "<label for='new_password'>新しいパスワード <span style='color:red;'>*</span></label><input type='password' id='new_password' name='new_password' required>";
-            echo "<label for='new_password_confirm'>新しいパスワード（確認用） <span style='color:red;'>*</span></label><input type='password' id='new_password_confirm' name='new_password_confirm' required>";
-            echo "<button type='submit' class='btn'>変更する</button></fieldset></form></main></body></html>";
+            
+            echo "<form method='POST'><fieldset><legend>ユーザー情報の変更</legend>";
+            
+            if ($allowEmailChange) {
+                echo "<label for='email'>メールアドレス</label><input type='email' id='email' name='email' value='".htmlspecialchars($userProfile['email'] ?? '')."'>";
+            } else {
+                echo "<label>メールアドレス (現在は変更できません)</label><input type='email' value='".htmlspecialchars($userProfile['email'] ?? '')."' disabled style='background:#e9ecef;'>";
+            }
+
+            echo "<hr style='border-top:1px solid #dee2e6; margin:20px 0;'>";
+            
+            echo "<label for='new_password'>新しいパスワード <span style='color:#666; font-size:0.9em;'>(変更する場合のみ入力)</span></label><input type='password' id='new_password' name='new_password'>";
+            echo "<label for='new_password_confirm'>新しいパスワード（確認用）</label><input type='password' id='new_password_confirm' name='new_password_confirm'>";
+            
+            echo "<hr style='border-top:1px solid #dee2e6; margin:20px 0;'>";
+            
+            echo "<label for='current_password'>現在のパスワード <span style='color:red;'>*</span> <span style='color:#666; font-size:0.9em;'>(保存の確認に必要です)</span></label><input type='password' id='current_password' name='current_password' required>";
+            
+            echo "<button type='submit' class='btn'>保存する</button></fieldset></form></main></body></html>";
             return;
         }
 
