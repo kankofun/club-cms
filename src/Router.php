@@ -72,7 +72,7 @@ class Router {
             $vars[trim($k)] = trim($v);
         }
 
-        // 古い方式の互換対応
+        // 古い方式の互換用
         if (strpos($text, '{{latest_blogs}}') !== false) {
             $vars['latest_blogs'] = '{{latest_blogs_5}}';
         }
@@ -318,7 +318,6 @@ HTML;
             $cleanPath = 'blogs'; 
         }
 
-        // ★ サイト全体検索機能
         if ($cleanPath === 'search') {
             if (empty($settings['site_search_enabled'])) {
                 $this->renderErrorPage(404, $baseUrl, "検索機能は無効です。");
@@ -506,48 +505,86 @@ HTML;
             $article = $this->contentModel->getBySlug($matches[1], 'blog');
             if (!$article) $this->renderErrorPage(404, $baseUrl, "お探しの記事は見つかりませんでした。");
 
+            $allBlogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
+            usort($allBlogs, function($a, $b) { return strtotime($b['updated_at']) < strtotime($a['updated_at']) ? 1 : -1; });
+            
+            $prevLink = '';
+            $nextLink = '';
+            $allBlogsValues = array_values($allBlogs);
+            for ($i = 0; $i < count($allBlogsValues); $i++) {
+                if ($allBlogsValues[$i]['id'] === $article['id']) {
+                    if ($i < count($allBlogsValues) - 1) {
+                        $prev = $allBlogsValues[$i + 1];
+                        $prevLink = "<a href='{$baseUrl}blog/".htmlspecialchars($prev['slug'])."'>&laquo; ".htmlspecialchars($prev['title'])."</a>";
+                    }
+                    if ($i > 0) {
+                        $next = $allBlogsValues[$i - 1];
+                        $nextLink = "<a href='{$baseUrl}blog/".htmlspecialchars($next['slug'])."'>".htmlspecialchars($next['title'])." &raquo;</a>";
+                    }
+                    break;
+                }
+            }
+
+            $createdAt = !empty($article['created_at']) ? $article['created_at'] : ($article['updated_at'] ?? 'now');
+            $updatedAt = $article['updated_at'] ?? 'now';
+            $cDate = date('Y.m.d H:i', strtotime($createdAt));
+            $uDate = date('Y.m.d H:i', strtotime($updatedAt));
+            $upText = ($cDate !== $uDate) ? "<span style='margin-left:10px;'>(更新日: <time datetime='".htmlspecialchars($updatedAt)."'>{$uDate}</time>)</span>" : "";
+
+            $catHtml = '';
+            if (!empty($settings['blog_category_enabled']) && !empty($article['category_id'])) {
+                $categories = $this->contentModel->getCategories();
+                foreach($categories as $c) {
+                    if($c['id'] === $article['category_id']) {
+                        $catHtml = "<span style='background:#007bff; color:#fff; padding:2px 6px; border-radius:3px; font-size:0.8em; margin-left:10px;'><a href='{$baseUrl}blogs?category={$c['id']}' style='color:#fff;text-decoration:none;'>".htmlspecialchars($c['name'])."</a></span>";
+                        break;
+                    }
+                }
+            }
+            
+            $tagsHtml = '';
+            if (!empty($settings['blog_tag_enabled']) && !empty($article['tags'])) {
+                foreach ($article['tags'] as $t) {
+                    $tagsHtml .= " <a href='{$baseUrl}blogs?tag=".urlencode($t)."' style='display:inline-block; background:#e2e3e5; padding:2px 8px; border-radius:10px; text-decoration:none; color:#333; margin-left:5px; font-size:0.9em;'>#".htmlspecialchars($t)."</a>";
+                }
+            }
+
+            $blogLayout = $this->templateModel->get('blog_layout.html');
+            if (!$blogLayout) {
+                $blogLayout = "<main><article><h1 style='margin-bottom: 5px;'>{{title}}</h1><div style='color:#666; font-size:0.9em; margin-bottom:20px; border-bottom:1px solid #ccc; padding-bottom:10px;'>作成日: <time datetime='{{created_at}}'>{{created_at_date}}</time> {{updated_at_text}} {{category_html}} {{tags_html}}</div><div id='md-content'></div></article><div style='display:flex; justify-content:space-between; margin-top:30px; padding-top:20px; border-top:1px solid #eee;'><div>{{prev_link}}</div><div>{{next_link}}</div></div></main>";
+            }
+
+            $replacePairs = [
+                '{{title}}' => htmlspecialchars($article['title']),
+                '{{created_at}}' => htmlspecialchars($createdAt),
+                '{{created_at_date}}' => $cDate,
+                '{{updated_at_text}}' => $upText,
+                '{{category_html}}' => $catHtml,
+                '{{tags_html}}' => $tagsHtml,
+                '{{prev_link}}' => $prevLink,
+                '{{next_link}}' => $nextLink
+            ];
+
+            foreach ($replacePairs as $k => $v) {
+                $blogLayout = str_replace($k, $v, $blogLayout);
+            }
+
             $blogFormat = $settings['blog_title_format'] ?? '{{title}}';
             $customTitle = str_replace('{{title}}', $article['title'] ?? '', $blogFormat);
-            $bodyWithVars = $this->replaceVariables($article['body'], $baseUrl);
-            $safeBodyJson = json_encode($bodyWithVars, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+            $blogLayout = $this->replaceVariables($blogLayout, $baseUrl);
+            
+            $safeBodyJson = json_encode($article['body'], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
             
             $header = $this->templateModel->renderHeader($baseUrl);
             $header = $this->injectHeadTags($header, '', $customTitle, $canonicalUrl);
             $header = $this->replaceVariables($header, $baseUrl);
             echo $header;
             
-            echo "<main><article>";
-            echo "<h1 style='margin-bottom: 5px;'>" . htmlspecialchars($article['title']) . "</h1>";
-            
-            $createdAt = !empty($article['created_at']) ? $article['created_at'] : ($article['updated_at'] ?? 'now');
-            $updatedAt = $article['updated_at'] ?? 'now';
-            $cDate = date('Y.m.d H:i', strtotime($createdAt));
-            $uDate = date('Y.m.d H:i', strtotime($updatedAt));
-            
-            echo "<div style='color:#666; font-size:0.9em; margin-bottom:20px; border-bottom:1px solid #ccc; padding-bottom:10px;'>";
-            echo "作成日: <time datetime='".htmlspecialchars($createdAt)."'>{$cDate}</time>";
-            if ($cDate !== $uDate) echo " <span style='margin-left:10px;'>(更新日: <time datetime='".htmlspecialchars($updatedAt)."'>{$uDate}</time>)</span>";
-            
-            if (!empty($settings['blog_category_enabled']) && !empty($article['category_id'])) {
-                $categories = $this->contentModel->getCategories();
-                foreach($categories as $c) {
-                    if($c['id'] === $article['category_id']) {
-                        echo " <span style='background:#007bff; color:#fff; padding:2px 6px; border-radius:3px; font-size:0.8em; margin-left:10px;'><a href='{$baseUrl}blogs?category={$c['id']}' style='color:#fff;text-decoration:none;'>".htmlspecialchars($c['name'])."</a></span>";
-                        break;
-                    }
-                }
-            }
-            if (!empty($settings['blog_tag_enabled']) && !empty($article['tags'])) {
-                foreach ($article['tags'] as $t) {
-                    echo " <a href='{$baseUrl}blogs?tag=".urlencode($t)."' style='display:inline-block; background:#e2e3e5; padding:2px 8px; border-radius:10px; text-decoration:none; color:#333; margin-left:5px; font-size:0.9em;'>#".htmlspecialchars($t)."</a>";
-                }
-            }
-            echo "</div>";
+            echo $blogLayout;
 
-            echo "<div id='md-content'></div></article></main>";
             echo "<script src='https://cdn.jsdelivr.net/npm/marked/marked.min.js'></script>";
             echo "<script src='https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js'></script>";
-            echo "<script>document.addEventListener('DOMContentLoaded', () => { document.getElementById('md-content').innerHTML = DOMPurify.sanitize(marked.parse({$safeBodyJson}), { ADD_ATTR: ['style', 'class', 'target', 'width', 'height', 'align', 'color'] }); });</script>";
+            echo "<script>document.addEventListener('DOMContentLoaded', () => { const md = document.getElementById('md-content'); if(md) md.innerHTML = DOMPurify.sanitize(marked.parse({$safeBodyJson}), { ADD_ATTR: ['style', 'class', 'target', 'width', 'height', 'align', 'color'] }); });</script>";
             
             $footer = $this->templateModel->renderFooter();
             echo $this->replaceVariables($footer, $baseUrl);
@@ -1145,7 +1182,7 @@ HTML;
         }
 
         // ==========================================
-        // ログ・バックアップ・ユーザー・カテゴリ (これまでのコードそのまま)
+        // ログ出力 (管理者)
         // ==========================================
         if ($path === 'cms/logs/download' && $currentUser['role'] === 'admin') {
             $logFile = __DIR__ . '/../data/app.log';
@@ -1172,6 +1209,9 @@ HTML;
             echo "</tbody></table></main></body></html>"; return;
         }
 
+        // ==========================================
+        // 全データバックアップ・復元 (管理者)
+        // ==========================================
         if ($path === 'cms/backups/export' && $currentUser['role'] === 'admin') {
             if ($method === 'POST') {
                 $zip = new ZipArchive();
@@ -1223,11 +1263,17 @@ HTML;
 
         if ($path === 'cms/backups' && $currentUser['role'] === 'admin') {
             echo $adminHead . "<h1>復元と入出力</h1>";
-            if (isset($_GET['msg']) && $_GET['msg'] === 'imported') echo "<div class='alert' role='alert'>全データのインポートが完了しました。システムが更新されました。</div>";
+            
+            if (isset($_GET['msg']) && $_GET['msg'] === 'imported') {
+                echo "<div class='alert' role='alert'>全データのインポートが完了しました。システムが更新されました。</div>";
+            }
+            
             $backupDir = __DIR__ . '/../data/backups';
+            
             if ($method === 'POST' && !empty($_POST['restore_file']) && !empty($_POST['original_file'])) {
                 $restorePath = $backupDir . '/' . $_POST['restore_file'];
                 $originalPath = __DIR__ . '/../data/' . $_POST['original_file'];
+                
                 if (file_exists($restorePath)) {
                     if (file_exists($originalPath)) {
                         $tempBackup = $backupDir . '/' . dirname($_POST['original_file']) . '/' . date('Ymd_His') . '_prerestore_' . basename($_POST['original_file']);
@@ -1243,12 +1289,14 @@ HTML;
             echo "<section style='margin-bottom: 30px; padding: 20px; border: 1px solid #ced4da; background: #fff; border-radius: 4px;'>";
             echo "<h2 style='margin-top: 0; border-bottom: none;'>全データの入出力 (バックアップ/移行用)</h2>";
             echo "<p style='color: #666; font-size: 0.9em; margin-bottom: 15px;'>現在のシステム内の全データ（ユーザー、記事、設定、テンプレート等）をZIP形式でダウンロードしたり、アップロードして復元することができます。<br>※サーバー負荷・容量削減のため、下部の「世代バックアップデータ」はZIPに含まれません。</p>";
+            
             echo "<div style='display: flex; gap: 20px; align-items: flex-start;'>";
             echo "<div style='flex: 1; border-right: 1px solid #ddd; padding-right: 20px;'>";
             echo "<h3 style='margin-top:0; font-size:1.1rem;'>エクスポート (出力)</h3>";
             echo "<form method='POST' action='{$baseUrl}cms/backups/export' onsubmit='return confirm(\"全データをZIPファイルとしてダウンロードしますか？\");'>";
             echo "<button type='submit' class='btn' style='background:#28a745; width:100%;'>全データをダウンロード (.zip)</button>";
             echo "</form></div>";
+
             echo "<div style='flex: 1; padding-left: 10px;'>";
             echo "<h3 style='margin-top:0; font-size:1.1rem;'>インポート (入力)</h3>";
             echo "<form method='POST' action='{$baseUrl}cms/backups/import' enctype='multipart/form-data' onsubmit='return confirm(\"【重大な警告】\\n現在のシステムのデータが全て上書きされます！\\n元の状態には戻せません。\\n\\n本当にインポートを実行しますか？\");'>";
@@ -1271,13 +1319,21 @@ HTML;
                             $originalBasename = $matches[2];
                             $originalDir = str_replace('\\', '/', dirname($relPath));
                             $originalFile = ($originalDir === '.' ? '' : $originalDir . '/') . $originalBasename;
+                            
                             $time = DateTime::createFromFormat('Ymd_His', $timeStr);
                             $timeFormatted = $time ? $time->format('Y-m-d H:i:s') : $timeStr;
-                            $backupFiles[] = [ 'backup_file' => $relPath, 'original_file' => $originalFile, 'time' => $timeFormatted, 'timestamp' => $file->getMTime() ];
+
+                            $backupFiles[] = [
+                                'backup_file' => $relPath,
+                                'original_file' => $originalFile,
+                                'time' => $timeFormatted,
+                                'timestamp' => $file->getMTime()
+                            ];
                         }
                     }
                 }
             }
+            
             usort($backupFiles, function($a, $b) { return $b['timestamp'] <=> $a['timestamp']; });
             
             echo "<table><thead><tr><th>対象ファイル (元の名前)</th><th>バックアップ日時</th><th>操作</th></tr></thead><tbody>";
@@ -1290,23 +1346,43 @@ HTML;
                 echo "</form></td></tr>";
             }
             if (empty($backupFiles)) echo "<tr><td colspan='3'>バックアップデータはありません。</td></tr>";
-            echo "</tbody></table></main></body></html>"; return;
+            echo "</tbody></table></main></body></html>";
+            return;
         }
 
+        // ==========================================
+        // ユーザー管理
+        // ==========================================
         if ($path === 'cms/users' && $currentUser['role'] === 'admin') {
             $search = $_GET['search'] ?? '';
             $batchMessage = '';
+
             if ($method === 'POST' && !empty($_POST['batch_action']) && !empty($_POST['user_ids'])) {
                 $action = $_POST['batch_action'];
                 foreach ($_POST['user_ids'] as $targetId) {
                     if ($targetId === $currentUser['id']) {
-                        if ($action === 'delete') { $batchMessage = "※ログイン中の自分自身は削除から除外されました。"; continue; }
-                        if ($action === 'lock') { $batchMessage = "※ログイン中の自分自身は一時停止できません。"; continue; }
+                        if ($action === 'delete') {
+                            $batchMessage = "※ログイン中の自分自身は削除から除外されました。";
+                            continue;
+                        }
+                        if ($action === 'lock') {
+                            $batchMessage = "※ログイン中の自分自身は一時停止できません。";
+                            continue;
+                        }
                     }
-                    if ($action === 'delete') $this->userModel->delete($targetId);
-                    elseif (in_array($action, ['admin', 'special', 'general'])) { $u = $this->userModel->findById($targetId); if ($u) { $u['role'] = $action; $this->userModel->save($u); } }
-                    elseif ($action === 'lock') { $u = $this->userModel->findById($targetId); if ($u) { $u['is_locked'] = true; $this->userModel->save($u); } }
-                    elseif ($action === 'unlock') { $u = $this->userModel->findById($targetId); if ($u) { $u['is_locked'] = false; $this->userModel->save($u); } }
+                    
+                    if ($action === 'delete') {
+                        $this->userModel->delete($targetId);
+                    } elseif (in_array($action, ['admin', 'special', 'general'])) {
+                        $u = $this->userModel->findById($targetId);
+                        if ($u) { $u['role'] = $action; $this->userModel->save($u); }
+                    } elseif ($action === 'lock') {
+                        $u = $this->userModel->findById($targetId);
+                        if ($u) { $u['is_locked'] = true; $this->userModel->save($u); }
+                    } elseif ($action === 'unlock') {
+                        $u = $this->userModel->findById($targetId);
+                        if ($u) { $u['is_locked'] = false; $this->userModel->save($u); }
+                    }
                 }
                 $this->writeLog($currentUser, 'Batch Action', "Action: {$action}");
                 if (empty($batchMessage)) { header("Location: {$baseUrl}cms/users"); exit; }
@@ -1442,6 +1518,7 @@ HTML;
 
                 foreach ($csvData as $index => $row) {
                     if ($hasHeader && $index === 0) continue;
+                    
                     $studentId = ($map['student_id'] !== '' && isset($row[$map['student_id']])) ? trim($row[$map['student_id']]) : '';
                     if (empty($studentId)) continue;
                     
@@ -1568,6 +1645,8 @@ HTML;
                 $this->templateModel->save('header.html', $_POST['header']);
                 $this->templateModel->save('footer.html', $_POST['footer']);
                 $this->templateModel->save('style.css', $_POST['css']);
+                // ★ ブログ記事レイアウトの保存
+                $this->templateModel->save('blog_layout.html', $_POST['blog_layout'] ?? '');
                 
                 $newSettings = $settings;
                 $newSettings['variables'] = $_POST['variables'];
@@ -1641,6 +1720,32 @@ HTML;
             echo "<label>ヘッダー</label><textarea name='header' style='height:150px; font-family:monospace;'>" . htmlspecialchars($this->templateModel->get('header.html')) . "</textarea>";
             echo "<label>フッター</label><textarea name='footer' style='height:100px; font-family:monospace;'>" . htmlspecialchars($this->templateModel->get('footer.html')) . "</textarea>";
             echo "<label>共通CSS</label><textarea name='css' style='height:150px; font-family:monospace;'>" . htmlspecialchars($this->templateModel->get('style.css')) . "</textarea>";
+            
+            // ★ ブログ記事レイアウト編集の追加
+            $defaultBlogLayout = <<<HTML
+<main>
+    <article>
+        <h1 style='margin-bottom: 5px;'>{{title}}</h1>
+        <div style='color:#666; font-size:0.9em; margin-bottom:20px; border-bottom:1px solid #ccc; padding-bottom:10px;'>
+            作成日: <time datetime='{{created_at}}'>{{created_at_date}}</time> {{updated_at_text}} {{category_html}} {{tags_html}}
+        </div>
+        <div id='md-content'></div>
+    </article>
+    <div style='display:flex; justify-content:space-between; margin-top:30px; padding-top:20px; border-top:1px solid #eee;'>
+        <div>{{prev_link}}</div>
+        <div>{{next_link}}</div>
+    </div>
+</main>
+HTML;
+            $savedBlogLayout = $this->templateModel->get('blog_layout.html');
+            if (!$savedBlogLayout) $savedBlogLayout = $defaultBlogLayout;
+            
+            echo "<div style='margin-top:20px;'>";
+            echo "<label style='font-weight:bold;'>ブログ記事詳細用HTMLテンプレート</label>";
+            echo "<p style='font-size:0.9em;color:#666;margin-top:0;'>※必ず <code>&lt;div id='md-content'&gt;&lt;/div&gt;</code> を含めてください（この部分に本文が変換されて表示されます）。</p>";
+            echo "<textarea name='blog_layout' style='height:250px; font-family:monospace;'>" . htmlspecialchars($savedBlogLayout) . "</textarea>";
+            echo "</div>";
+
             echo "</fieldset><button type='submit' class='btn'>保存する</button></form></main></body></html>";
             return;
         }
@@ -1734,7 +1839,7 @@ HTML;
         }
 
         // ==========================================
-        // ★ 記事編集 (Markdownボタン・プレビュー機能搭載)
+        // ★ 記事編集 (Markdownボタン・プレビュー機能の出し分け)
         // ==========================================
         if ($path === 'cms/contents/edit') {
             $id = $_GET['id'] ?? '';
@@ -1887,7 +1992,7 @@ HTML;
             }
             echo "</fieldset>";
 
-            // ★ ツールバーとプレビューエリア
+            // ★ ツールバーの出し分け
             $customVars = [];
             $rawVars = $settings['variables'] ?? '';
             $lines = explode("\n", $rawVars);
@@ -1901,35 +2006,50 @@ HTML;
             echo "<fieldset style='display:flex; flex-direction:column;'><legend>本文</legend>";
             
             echo "<div style='margin-bottom:10px; padding:10px; background:#f8f9fa; border:1px solid #ced4da; border-radius:4px;'>";
-            echo "<strong style='display:block; margin-bottom:5px; font-size:0.9em; color:#555;'>Markdown入力補助</strong>";
-            echo "<button type='button' class='btn md-btn' data-prefix='**' data-suffix='**' style='padding:4px 8px; margin-right:5px; font-size:0.9em; background:#6c757d;'>太字</button>";
-            echo "<button type='button' class='btn md-btn' data-prefix='*' data-suffix='*' style='padding:4px 8px; margin-right:5px; font-size:0.9em; background:#6c757d;'>斜体</button>";
-            echo "<button type='button' class='btn md-btn' data-prefix='## ' data-suffix='' style='padding:4px 8px; margin-right:5px; font-size:0.9em; background:#6c757d;'>見出し2</button>";
-            echo "<button type='button' class='btn md-btn' data-prefix='### ' data-suffix='' style='padding:4px 8px; margin-right:5px; font-size:0.9em; background:#6c757d;'>見出し3</button>";
-            echo "<button type='button' class='btn md-btn' data-prefix='[リンク名](' data-suffix=')' style='padding:4px 8px; margin-right:5px; font-size:0.9em; background:#6c757d;'>リンク</button>";
-            echo "<button type='button' class='btn md-btn' data-prefix='![代替テキスト](' data-suffix=')' style='padding:4px 8px; margin-right:5px; font-size:0.9em; background:#6c757d;'>画像</button>";
-            echo "<button type='button' class='btn md-btn' data-prefix='- ' data-suffix='' style='padding:4px 8px; margin-right:5px; font-size:0.9em; background:#6c757d;'>リスト</button>";
-            echo "<button type='button' class='btn md-btn' data-prefix='> ' data-suffix='' style='padding:4px 8px; margin-right:5px; font-size:0.9em; background:#6c757d;'>引用</button>";
-            
-            echo "<strong style='display:block; margin-top:10px; margin-bottom:5px; font-size:0.9em; color:#555;'>変数挿入 (クリックで挿入)</strong>";
-            echo "<div style='display:flex; flex-wrap:wrap; gap:5px;'>";
-            echo "<button type='button' class='btn var-btn' data-var='{{latest_blogs_5}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>最新ブログ(5件)</button>";
-            echo "<button type='button' class='btn var-btn' data-var='{{latest_blogs_3}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>最新ブログ(3件)</button>";
-            echo "<button type='button' class='btn var-btn' data-var='{{blog_search_form}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>ブログ検索</button>";
-            if (!empty($settings['site_search_enabled'])) {
-                echo "<button type='button' class='btn var-btn' data-var='{{site_search_form}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>全体検索</button>";
+            if ($isPage) {
+                // 通常ページ
+                echo "<strong style='display:block; margin-bottom:5px; font-size:0.9em; color:#555;'>変数挿入 (クリックで挿入)</strong>";
+                echo "<div style='display:flex; flex-wrap:wrap; gap:5px;'>";
+                echo "<button type='button' class='btn var-btn' data-var='{{latest_blogs_5}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>最新ブログ(5件)</button>";
+                echo "<button type='button' class='btn var-btn' data-var='{{latest_blogs_3}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>最新ブログ(3件)</button>";
+                echo "<button type='button' class='btn var-btn' data-var='{{blog_search_form}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>ブログ検索</button>";
+                if (!empty($settings['site_search_enabled'])) {
+                    echo "<button type='button' class='btn var-btn' data-var='{{site_search_form}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>全体検索</button>";
+                }
+                foreach ($customVars as $cv) {
+                    echo "<button type='button' class='btn var-btn' data-var='{{{$cv}}}' style='padding:4px 8px; font-size:0.85em; background:#ffc107; color:#333;'>{$cv}</button>";
+                }
+                echo "</div>";
+            } else {
+                // ブログ
+                echo "<strong style='display:block; margin-bottom:5px; font-size:0.9em; color:#555;'>Markdown入力補助</strong>";
+                echo "<div style='display:flex; flex-wrap:wrap; gap:5px;'>";
+                echo "<button type='button' class='btn md-btn' data-prefix='**' data-suffix='**' style='padding:4px 8px; font-size:0.9em; background:#6c757d;'>太字</button>";
+                echo "<button type='button' class='btn md-btn' data-prefix='*' data-suffix='*' style='padding:4px 8px; font-size:0.9em; background:#6c757d;'>斜体</button>";
+                echo "<button type='button' class='btn md-btn' data-prefix='## ' data-suffix='' style='padding:4px 8px; font-size:0.9em; background:#6c757d;'>見出し2</button>";
+                echo "<button type='button' class='btn md-btn' data-prefix='### ' data-suffix='' style='padding:4px 8px; font-size:0.9em; background:#6c757d;'>見出し3</button>";
+                echo "<button type='button' class='btn md-btn' data-prefix='[リンク名](' data-suffix=')' style='padding:4px 8px; font-size:0.9em; background:#6c757d;'>リンク</button>";
+                echo "<button type='button' class='btn md-btn' data-prefix='![代替テキスト](' data-suffix=')' style='padding:4px 8px; font-size:0.9em; background:#6c757d;'>画像</button>";
+                echo "<button type='button' class='btn md-btn' data-prefix='- ' data-suffix='' style='padding:4px 8px; font-size:0.9em; background:#6c757d;'>リスト</button>";
+                echo "<button type='button' class='btn md-btn' data-prefix='> ' data-suffix='' style='padding:4px 8px; font-size:0.9em; background:#6c757d;'>引用</button>";
+                echo "</div>";
+                echo "<div style='margin-top:10px; padding-top:10px; border-top:1px dashed #ccc;'>";
+                echo "<label><input type='checkbox' id='toggle-preview' checked> リアルタイムプレビューを表示する</label>";
+                echo "</div>";
             }
-            foreach ($customVars as $cv) {
-                echo "<button type='button' class='btn var-btn' data-var='{{{$cv}}}' style='padding:4px 8px; font-size:0.85em; background:#ffc107; color:#333;'>{$cv}</button>";
-            }
-            echo "</div></div>";
+            echo "</div>";
 
             echo "<div style='display:flex; gap:20px; flex-wrap:wrap;'>";
             echo "<textarea id='editor-textarea' name='body' style='flex:1; min-width:300px; height:500px; font-family:monospace;' required>".htmlspecialchars($formData['body'])."</textarea>";
-            echo "<div style='flex:1; min-width:300px; display:flex; flex-direction:column;'>";
-            echo "<div style='background:#007bff; color:#fff; padding:5px 10px; font-size:0.9em; border-radius:4px 4px 0 0;'>リアルタイムプレビュー</div>";
-            echo "<div id='preview-area' style='flex:1; height:465px; overflow-y:auto; border:1px solid #ced4da; padding:15px; background:#fafafa; border-radius:0 0 4px 4px;'></div>";
-            echo "</div></div></fieldset>";
+            
+            // ★ プレビューエリア（ブログのみ）
+            if (!$isPage) {
+                echo "<div id='preview-container' style='flex:1; min-width:300px; display:flex; flex-direction:column;'>";
+                echo "<div style='background:#007bff; color:#fff; padding:5px 10px; font-size:0.9em; border-radius:4px 4px 0 0;'>リアルタイムプレビュー</div>";
+                echo "<div id='preview-area' style='flex:1; height:465px; overflow-y:auto; border:1px solid #ced4da; padding:15px; background:#fafafa; border-radius:0 0 4px 4px;'></div>";
+                echo "</div>";
+            }
+            echo "</div></fieldset>";
 
             echo "<button type='submit' class='btn' style='margin-right:10px;'>保存する</button> <a href='{$baseUrl}cms/contents' class='btn' style='background:#6c757d;'>キャンセル</a></form>";
             
@@ -1940,15 +2060,29 @@ HTML;
 document.addEventListener('DOMContentLoaded', () => {
     const editor = document.getElementById('editor-textarea');
     const preview = document.getElementById('preview-area');
+    const previewContainer = document.getElementById('preview-container');
+    const toggle = document.getElementById('toggle-preview');
     
-    const updatePreview = () => {
-        const md = editor.value;
-        const html = DOMPurify.sanitize(marked.parse(md), { ADD_ATTR: ['style', 'class', 'target', 'width', 'height', 'align', 'color'] });
-        preview.innerHTML = html || '<span style="color:#999;">(テキストを入力するとここにプレビューが表示されます)</span>';
-    };
-    
-    editor.addEventListener('input', updatePreview);
-    updatePreview();
+    if (preview && toggle) {
+        const updatePreview = () => {
+            if (!toggle.checked) return;
+            const md = editor.value;
+            const html = DOMPurify.sanitize(marked.parse(md), { ADD_ATTR: ['style', 'class', 'target', 'width', 'height', 'align', 'color'] });
+            preview.innerHTML = html || '<span style="color:#999;">(テキストを入力するとここにプレビューが表示されます)</span>';
+        };
+        
+        editor.addEventListener('input', updatePreview);
+        updatePreview();
+        
+        toggle.addEventListener('change', () => {
+            if (toggle.checked) {
+                previewContainer.style.display = 'flex';
+                updatePreview();
+            } else {
+                previewContainer.style.display = 'none';
+            }
+        });
+    }
 
     const insertText = (text, prefix = '', suffix = '') => {
         const start = editor.selectionStart;
@@ -1968,19 +2102,18 @@ document.addEventListener('DOMContentLoaded', () => {
         editor.selectionStart = start + prefix.length + (selected ? selected.length : text.length);
         editor.selectionEnd = editor.selectionStart;
         editor.focus();
-        updatePreview();
+        
+        if (preview && toggle && toggle.checked) {
+            editor.dispatchEvent(new Event('input'));
+        }
     };
 
     document.querySelectorAll('.md-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            insertText('', btn.dataset.prefix, btn.dataset.suffix);
-        });
+        btn.addEventListener('click', () => insertText('', btn.dataset.prefix, btn.dataset.suffix));
     });
 
     document.querySelectorAll('.var-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            insertText(btn.dataset.var);
-        });
+        btn.addEventListener('click', () => insertText(btn.dataset.var));
     });
 });
 </script>
@@ -1990,7 +2123,7 @@ JS;
         }
 
         // ==========================================
-        // キャッチオール
+        // 4. キャッチオール：静的サイト風の通常ページ出力
         // ==========================================
         if ($pageArticle ?? false) {
             $header = $this->templateModel->renderHeader($baseUrl);
