@@ -59,51 +59,77 @@ class Router {
         @file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
     }
 
+    // ★ 強化された変数置換エンジン
     private function replaceVariables($text, $baseUrl) {
         if (!is_string($text) || $text === '') return '';
-        $vars = [];
         $settings = $this->getSettings();
+        
+        // 1. カスタム変数の置換
         $rawVars = $settings['variables'] ?? '';
         $lines = explode("\n", $rawVars);
         foreach($lines as $line) {
             $line = trim($line);
             if ($line === '' || strpos($line, '=') === false) continue;
             list($k, $v) = explode('=', $line, 2);
-            $vars[trim($k)] = trim($v);
+            $text = str_replace('{{' . trim($k) . '}}', trim($v), $text);
         }
 
-        // 古い方式の互換用
-        if (strpos($text, '{{latest_blogs}}') !== false) {
-            $vars['latest_blogs'] = '{{latest_blogs_5}}';
-        }
-
-        foreach($vars as $k => $v) { $text = str_replace('{{' . $k . '}}', $v, $text); }
-
-        // ブログ検索フォーム置換
+        // 2. ブログ検索フォーム置換
         if (strpos($text, '{{blog_search_form}}') !== false) {
             $formHtml = "<form action='{$baseUrl}blogs' method='GET' style='display:flex;gap:5px;margin-bottom:15px;'><input type='text' name='q' placeholder='ブログを検索...' required style='padding:5px; flex:1;'><button type='submit' style='padding:5px 10px;cursor:pointer;'>検索</button></form>";
             $text = str_replace('{{blog_search_form}}', $formHtml, $text);
         }
 
-        // サイト全体検索フォーム置換
+        // 3. サイト全体検索フォーム置換
         if (strpos($text, '{{site_search_form}}') !== false) {
             if (!empty($settings['site_search_enabled'])) {
                 $formHtml = "<form action='{$baseUrl}search' method='GET' style='display:flex;gap:5px;margin-bottom:15px;'><input type='text' name='q' placeholder='サイト内を検索...' required style='padding:5px; flex:1;'><button type='submit' style='padding:5px 10px;cursor:pointer;'>検索</button></form>";
                 $text = str_replace('{{site_search_form}}', $formHtml, $text);
             } else {
-                $text = str_replace('{{site_search_form}}', '', $text); // 無効時は消す
+                $text = str_replace('{{site_search_form}}', '', $text);
             }
         }
 
-        // 最新ブログの件数指定置換 {{latest_blogs_X}}
-        $text = preg_replace_callback('/\{\{latest_blogs(?:_(\d+))?\}\}/', function($m) use ($baseUrl) {
-            $limit = isset($m[1]) ? (int)$m[1] : 5;
+        // 旧互換
+        $text = str_replace('{{latest_blogs}}', '{{blogs limit=5}}', $text);
+        $text = preg_replace('/\{\{latest_blogs_(\d+)\}\}/', '{{blogs limit=$1}}', $text);
+
+        // 4. カスタム可能なブログリスト展開: {{blogs limit=5 category=xxx tag=yyy order=desc sort=date}}
+        $text = preg_replace_callback('/\{\{blogs\s*(.*?)\}\}/', function($m) use ($baseUrl) {
+            $attrStr = trim($m[1]);
+            $args = [];
+            if (preg_match_all('/(\w+)=([^\s]+)/', $attrStr, $matches, PREG_SET_ORDER)) {
+                foreach($matches as $match) $args[$match[1]] = $match[2];
+            }
+
+            $limit = isset($args['limit']) ? (int)$args['limit'] : 5;
+            $catId = $args['category'] ?? '';
+            $tag = $args['tag'] ?? '';
+            $order = $args['order'] ?? 'desc';
+            $sort = $args['sort'] ?? 'date';
+            
             $blogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
-            usort($blogs, function($a, $b) { return strtotime($b['updated_at']) < strtotime($a['updated_at']) ? 1 : -1; });
-            $blogs = array_slice($blogs, 0, $limit);
+            
+            $filteredBlogs = [];
+            foreach ($blogs as $b) {
+                if ($catId && ($b['category_id'] ?? '') !== $catId) continue;
+                if ($tag && (!isset($b['tags']) || !is_array($b['tags']) || !in_array($tag, $b['tags']))) continue;
+                $filteredBlogs[] = $b;
+            }
+
+            usort($filteredBlogs, function($a, $b) use ($sort, $order) {
+                $valA = strtotime($a['updated_at']);
+                $valB = strtotime($b['updated_at']);
+                if ($valA == $valB) return 0;
+                if ($order === 'asc') return ($valA < $valB) ? -1 : 1;
+                return ($valA > $valB) ? -1 : 1;
+            });
+
+            $pagedBlogs = array_slice($filteredBlogs, 0, $limit);
+            if (empty($pagedBlogs)) return "<p>記事がありません。</p>";
             
             $html = "<ul class='latest-blogs' style='list-style:none; padding:0;'>";
-            foreach ($blogs as $blog) {
+            foreach ($pagedBlogs as $blog) {
                 $date = date('Y.m.d', strtotime($blog['updated_at']));
                 $html .= "<li style='margin-bottom:8px;'><span style='color:#666; font-size:0.9em; margin-right:10px;'>{$date}</span> <a href='{$baseUrl}blog/" . htmlspecialchars($blog['slug'] ?? '') . "'>" . htmlspecialchars($blog['title']) . "</a></li>";
             }
@@ -158,7 +184,6 @@ class Router {
     private function renderErrorPage($code, $baseUrl, $defaultMessage, $adminHead = null) {
         http_response_code($code);
         $errorPage = $this->contentModel->getBySlug((string)$code, 'page');
-        
         if ($errorPage) {
             $header = $this->templateModel->renderHeader($baseUrl);
             $header = $this->injectHeadTags($header, $errorPage['meta_description'] ?? '', $errorPage['title'] ?? "{$code} Error");
@@ -318,22 +343,45 @@ HTML;
             $cleanPath = 'blogs'; 
         }
 
+        // ★ 全体検索機能
         if ($cleanPath === 'search') {
-            if (empty($settings['site_search_enabled'])) {
-                $this->renderErrorPage(404, $baseUrl, "検索機能は無効です。");
-            }
+            if (empty($settings['site_search_enabled'])) $this->renderErrorPage(404, $baseUrl, "検索機能は無効です。");
             $q = trim($_GET['q'] ?? '');
+            $p = max(1, (int)($_GET['p'] ?? 1));
+            $sort = $_GET['sort'] ?? ($q !== '' ? 'score' : 'date');
+            $order = $_GET['order'] ?? 'desc';
             
             $results = [];
             if ($q !== '') {
                 $allContents = $this->contentModel->getAll();
                 foreach ($allContents as $c) {
-                    $searchStr = mb_strtolower($c['title'] . ' ' . $c['body'] . ' ' . ($c['slug']??''));
-                    if (mb_stripos($searchStr, mb_strtolower($q)) !== false) {
-                        $results[] = $c;
-                    }
+                    $c['score'] = 0;
+                    $searchStrTitle = mb_strtolower($c['title']);
+                    $searchStrBody = mb_strtolower($c['body']);
+                    $qLower = mb_strtolower($q);
+                    
+                    $countTitle = mb_substr_count($searchStrTitle, $qLower);
+                    $countBody = mb_substr_count($searchStrBody, $qLower);
+                    if ($countTitle === 0 && $countBody === 0) continue;
+                    
+                    $c['score'] = $countTitle * 10 + $countBody;
+                    $results[] = $c;
                 }
             }
+
+            usort($results, function($a, $b) use ($sort, $order) {
+                $valA = ($sort === 'score') ? $a['score'] : strtotime($a['updated_at']);
+                $valB = ($sort === 'score') ? $b['score'] : strtotime($b['updated_at']);
+                if ($valA == $valB) return 0;
+                if ($order === 'asc') return ($valA < $valB) ? -1 : 1;
+                return ($valA > $valB) ? -1 : 1;
+            });
+
+            $perPage = 10;
+            $total = count($results);
+            $maxPage = max(1, ceil($total / $perPage));
+            if ($p > $maxPage) $p = $maxPage;
+            $pagedResults = array_slice($results, ($p - 1) * $perPage, $perPage);
             
             $header = $this->templateModel->renderHeader($baseUrl);
             $header = $this->injectHeadTags($header, '', '検索結果: ' . $q, $canonicalUrl);
@@ -348,14 +396,29 @@ HTML;
             } elseif (empty($results)) {
                 echo "<p>「".htmlspecialchars($q)."」に一致するページは見つかりませんでした。</p>";
             } else {
-                echo "<p>".count($results)." 件見つかりました。</p>";
-                echo "<ul>";
-                foreach ($results as $r) {
+                echo "<form method='GET' style='display:flex; justify-content:space-between; align-items:center; margin-bottom: 20px; background:#f8f9fa; padding:10px; border-radius:4px;'>";
+                echo "<input type='hidden' name='q' value='".htmlspecialchars($q)."'>";
+                echo "<div>全 {$total} 件中 ".(($p-1)*$perPage+1)." - ".min($total, $p*$perPage)." 件を表示</div>";
+                echo "<div><select name='sort' onchange='this.form.submit()'><option value='score' ".($sort==='score'?'selected':'').">一致度順</option><option value='date' ".($sort==='date'?'selected':'').">日付順</option></select> ";
+                echo "<select name='order' onchange='this.form.submit()'><option value='desc' ".($order==='desc'?'selected':'').">降順</option><option value='asc' ".($order==='asc'?'selected':'').">昇順</option></select></div></form>";
+
+                echo "<ul style='list-style:none; padding:0;'>";
+                foreach ($pagedResults as $r) {
                     $url = $r['type'] === 'blog' ? "{$baseUrl}blog/" . htmlspecialchars($r['slug']) : "{$baseUrl}" . ltrim($r['slug'], '/');
                     $typeLabel = $r['type'] === 'blog' ? '[ブログ]' : '[ページ]';
-                    echo "<li style='margin-bottom:10px;'><span style='color:#666; font-size:0.9em; margin-right:10px;'>{$typeLabel}</span> <a href='{$url}' style='font-size:1.1em;'>".htmlspecialchars($r['title'])."</a></li>";
+                    echo "<li style='margin-bottom:15px; border-bottom:1px solid #eee; padding-bottom:10px;'><span style='color:#666; font-size:0.9em; margin-right:10px;'>{$typeLabel}</span> <a href='{$url}' style='font-size:1.1em;'>".htmlspecialchars($r['title'])."</a></li>";
                 }
                 echo "</ul>";
+
+                if ($maxPage > 1) {
+                    echo "<div style='margin-top:20px; display:flex; gap:5px; justify-content:center;'>";
+                    for ($i = 1; $i <= $maxPage; $i++) {
+                        $qStr = http_build_query(['q'=>$q, 'sort'=>$sort, 'order'=>$order, 'p'=>$i]);
+                        if ($i === $p) echo "<span style='padding:5px 10px; background:#007bff; color:#fff; border-radius:3px;'>{$i}</span>";
+                        else echo "<a href='{$baseUrl}search?{$qStr}' style='padding:5px 10px; background:#e9ecef; text-decoration:none; color:#333; border-radius:3px;'>{$i}</a>";
+                    }
+                    echo "</div>";
+                }
             }
             echo "</main>";
             $footer = $this->templateModel->renderFooter();
@@ -363,15 +426,17 @@ HTML;
             return;
         }
 
+        // ★ ブログ一覧（ページネーション＆並び替え強化）
         if ($cleanPath === 'blogs') {
             $q = trim($_GET['q'] ?? '');
             $catId = trim($_GET['category'] ?? '');
             $tag = trim($_GET['tag'] ?? '');
             $month = trim($_GET['month'] ?? '');
+            $p = max(1, (int)($_GET['p'] ?? 1));
+            $sort = $_GET['sort'] ?? ($q !== '' ? 'score' : 'date');
+            $order = $_GET['order'] ?? 'desc';
 
             $allBlogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
-            usort($allBlogs, function($a, $b) { return strtotime($b['updated_at']) < strtotime($a['updated_at']) ? 1 : -1; });
-
             $archives = [];
             foreach ($allBlogs as $b) {
                 $m = date('Y-m', strtotime($b['updated_at']));
@@ -379,26 +444,39 @@ HTML;
                 $archives[$m]++;
             }
 
-            $blogs = array_filter($allBlogs, function($b) use ($q, $catId, $tag, $month) {
-                if ($month && date('Y-m', strtotime($b['updated_at'])) !== $month) return false;
-                if ($catId && ($b['category_id'] ?? '') !== $catId) return false;
-                if ($tag && (!isset($b['tags']) || !is_array($b['tags']) || !in_array($tag, $b['tags']))) return false;
-                if ($q) {
-                    $searchStr = mb_strtolower($b['title'] . ' ' . $b['body']);
-                    if (mb_stripos($searchStr, mb_strtolower($q)) === false) return false;
+            $filteredBlogs = [];
+            foreach ($allBlogs as $b) {
+                if ($month && date('Y-m', strtotime($b['updated_at'])) !== $month) continue;
+                if ($catId && ($b['category_id'] ?? '') !== $catId) continue;
+                if ($tag && (!isset($b['tags']) || !is_array($b['tags']) || !in_array($tag, $b['tags']))) continue;
+                
+                $b['score'] = 0;
+                if ($q !== '') {
+                    $searchStrTitle = mb_strtolower($b['title']);
+                    $searchStrBody = mb_strtolower($b['body']);
+                    $qLower = mb_strtolower($q);
+                    
+                    $countTitle = mb_substr_count($searchStrTitle, $qLower);
+                    $countBody = mb_substr_count($searchStrBody, $qLower);
+                    if ($countTitle === 0 && $countBody === 0) continue;
+                    $b['score'] = $countTitle * 10 + $countBody;
                 }
-                return true;
+                $filteredBlogs[] = $b;
+            }
+
+            usort($filteredBlogs, function($a, $b) use ($sort, $order) {
+                $valA = ($sort === 'score') ? $a['score'] : strtotime($a['updated_at']);
+                $valB = ($sort === 'score') ? $b['score'] : strtotime($b['updated_at']);
+                if ($valA == $valB) return 0;
+                if ($order === 'asc') return ($valA < $valB) ? -1 : 1;
+                return ($valA > $valB) ? -1 : 1;
             });
 
-            $blogLatestCount = (int)($settings['blog_latest_count'] ?? 5);
-            $latestBlogs = array_slice($blogs, 0, $blogLatestCount);
-            $olderBlogs = array_slice($blogs, $blogLatestCount);
-
-            $groupedOlder = [];
-            foreach ($olderBlogs as $b) {
-                $m = date('Y年n月', strtotime($b['updated_at']));
-                $groupedOlder[$m][] = $b;
-            }
+            $perPage = 10;
+            $total = count($filteredBlogs);
+            $maxPage = max(1, ceil($total / $perPage));
+            if ($p > $maxPage) $p = $maxPage;
+            $pagedBlogs = array_slice($filteredBlogs, ($p - 1) * $perPage, $perPage);
 
             $categories = $this->contentModel->getCategories();
             $tags = $this->contentModel->getAllTags();
@@ -410,7 +488,7 @@ HTML;
             
             echo "<main style='display:flex; gap:20px; flex-wrap:wrap;'>";
             echo "<div style='flex: 1 1 60%;'>";
-            echo "<h1>ブログ一覧</h1>";
+            echo "<h1 style='margin-bottom:20px;'>ブログ一覧</h1>";
 
             if ($q || $catId || $tag || $month) {
                 echo "<div style='margin-bottom:20px; padding:10px; background:#e9ecef; border-radius:4px;'>";
@@ -423,17 +501,28 @@ HTML;
                 }
                 if ($tag) echo "タグ「".htmlspecialchars($tag)."」 ";
                 if ($month) echo "月「".htmlspecialchars($month)."」 ";
-                echo " <a href='{$baseUrl}blogs' style='font-size:0.9em; margin-left:10px;'>[クリア]</a></div>";
+                echo " <a href='{$baseUrl}blogs' style='font-size:0.9em; margin-left:10px;'>[条件をクリア]</a></div>";
             }
 
-            if (empty($blogs)) {
+            if (empty($filteredBlogs)) {
                 echo "<p>記事が見つかりませんでした。</p>";
             } else {
-                echo "<h2>最近の記事</h2><ul style='list-style:none; padding:0;'>";
-                foreach ($latestBlogs as $blog) {
+                echo "<form method='GET' style='display:flex; justify-content:space-between; align-items:center; margin-bottom: 20px; background:#f8f9fa; padding:10px; border-radius:4px;'>";
+                if($q) echo "<input type='hidden' name='q' value='".htmlspecialchars($q)."'>";
+                if($catId) echo "<input type='hidden' name='category' value='".htmlspecialchars($catId)."'>";
+                if($tag) echo "<input type='hidden' name='tag' value='".htmlspecialchars($tag)."'>";
+                if($month) echo "<input type='hidden' name='month' value='".htmlspecialchars($month)."'>";
+                echo "<div>全 {$total} 件中 ".(($p-1)*$perPage+1)." - ".min($total, $p*$perPage)." 件を表示</div>";
+                echo "<div><select name='sort' onchange='this.form.submit()'>";
+                if ($q) echo "<option value='score' ".($sort==='score'?'selected':'').">一致度順</option>";
+                echo "<option value='date' ".($sort==='date'?'selected':'').">日付順</option></select> ";
+                echo "<select name='order' onchange='this.form.submit()'><option value='desc' ".($order==='desc'?'selected':'').">降順</option><option value='asc' ".($order==='asc'?'selected':'').">昇順</option></select></div></form>";
+
+                echo "<ul style='list-style:none; padding:0;'>";
+                foreach ($pagedBlogs as $blog) {
                     $date = date('Y.m.d', strtotime($blog['updated_at']));
-                    echo "<li style='margin-bottom:15px; padding-bottom:15px; border-bottom:1px solid #eee;'>";
-                    echo "<span style='color:#666; font-size:0.9em; margin-right:10px;'>{$date}</span> ";
+                    echo "<li style='margin-bottom:20px; padding-bottom:15px; border-bottom:1px solid #eee;'>";
+                    echo "<div style='margin-bottom:5px;'><span style='color:#666; font-size:0.9em; margin-right:10px;'>{$date}</span> ";
                     
                     if (!empty($settings['blog_category_enabled']) && !empty($blog['category_id'])) {
                         foreach($categories as $c) {
@@ -443,10 +532,11 @@ HTML;
                             }
                         }
                     }
-                    echo "<a href='{$baseUrl}blog/" . htmlspecialchars($blog['slug'] ?? '') . "' style='font-size:1.1em; font-weight:bold;'>" . htmlspecialchars($blog['title']) . "</a>";
+                    echo "</div>";
+                    echo "<a href='{$baseUrl}blog/" . htmlspecialchars($blog['slug'] ?? '') . "' style='font-size:1.2em; font-weight:bold; text-decoration:none; color:#0056b3;'>" . htmlspecialchars($blog['title']) . "</a>";
                     
                     if (!empty($settings['blog_tag_enabled']) && !empty($blog['tags'])) {
-                        echo "<div style='margin-top:5px; font-size:0.85em; color:#666;'>";
+                        echo "<div style='margin-top:8px; font-size:0.85em; color:#666;'>";
                         foreach ($blog['tags'] as $t) echo "<a href='{$baseUrl}blogs?tag=".urlencode($t)."' style='display:inline-block; background:#e2e3e5; padding:2px 8px; border-radius:10px; text-decoration:none; color:#333; margin-right:5px;'>#".htmlspecialchars($t)."</a>";
                         echo "</div>";
                     }
@@ -454,17 +544,14 @@ HTML;
                 }
                 echo "</ul>";
 
-                if (!empty($groupedOlder)) {
-                    echo "<h2>過去の記事アーカイブ</h2>";
-                    foreach ($groupedOlder as $mName => $mBlogs) {
-                        echo "<details style='margin-bottom:10px;'><summary style='cursor:pointer; font-weight:bold; background:#f8f9fa; padding:10px; border:1px solid #dee2e6;'>{$mName} (".count($mBlogs)."件)</summary>";
-                        echo "<ul style='padding:10px 20px; border:1px solid #dee2e6; border-top:none; margin:0;'>";
-                        foreach ($mBlogs as $blog) {
-                            $date = date('Y.m.d', strtotime($blog['updated_at']));
-                            echo "<li style='margin-bottom:8px;'><span style='color:#666; font-size:0.9em; margin-right:10px;'>{$date}</span> <a href='{$baseUrl}blog/" . htmlspecialchars($blog['slug'] ?? '') . "'>" . htmlspecialchars($blog['title']) . "</a></li>";
-                        }
-                        echo "</ul></details>";
+                if ($maxPage > 1) {
+                    echo "<div style='margin-top:30px; display:flex; gap:5px; justify-content:center;'>";
+                    for ($i = 1; $i <= $maxPage; $i++) {
+                        $qStr = http_build_query(['q'=>$q, 'category'=>$catId, 'tag'=>$tag, 'month'=>$month, 'sort'=>$sort, 'order'=>$order, 'p'=>$i]);
+                        if ($i === $p) echo "<span style='padding:8px 12px; background:#007bff; color:#fff; border-radius:3px;'>{$i}</span>";
+                        else echo "<a href='{$baseUrl}blogs?{$qStr}' style='padding:8px 12px; background:#e9ecef; text-decoration:none; color:#333; border-radius:3px;'>{$i}</a>";
                     }
+                    echo "</div>";
                 }
             }
             echo "</div>";
@@ -501,6 +588,7 @@ HTML;
             return;
         }
 
+        // ★ ブログ記事詳細
         if (preg_match('#^blog/([^/]+)$#', $cleanPath, $matches)) {
             $article = $this->contentModel->getBySlug($matches[1], 'blog');
             if (!$article) $this->renderErrorPage(404, $baseUrl, "お探しの記事は見つかりませんでした。");
@@ -508,19 +596,12 @@ HTML;
             $allBlogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
             usort($allBlogs, function($a, $b) { return strtotime($b['updated_at']) < strtotime($a['updated_at']) ? 1 : -1; });
             
-            $prevLink = '';
-            $nextLink = '';
+            $prev = null; $next = null;
             $allBlogsValues = array_values($allBlogs);
             for ($i = 0; $i < count($allBlogsValues); $i++) {
                 if ($allBlogsValues[$i]['id'] === $article['id']) {
-                    if ($i < count($allBlogsValues) - 1) {
-                        $prev = $allBlogsValues[$i + 1];
-                        $prevLink = "<a href='{$baseUrl}blog/".htmlspecialchars($prev['slug'])."'>&laquo; ".htmlspecialchars($prev['title'])."</a>";
-                    }
-                    if ($i > 0) {
-                        $next = $allBlogsValues[$i - 1];
-                        $nextLink = "<a href='{$baseUrl}blog/".htmlspecialchars($next['slug'])."'>".htmlspecialchars($next['title'])." &raquo;</a>";
-                    }
+                    if ($i < count($allBlogsValues) - 1) $prev = $allBlogsValues[$i + 1];
+                    if ($i > 0) $next = $allBlogsValues[$i - 1];
                     break;
                 }
             }
@@ -549,9 +630,26 @@ HTML;
                 }
             }
 
-            $blogLayout = $this->templateModel->get('blog_layout.html');
-            if (!$blogLayout) {
-                $blogLayout = "<main><article><h1 style='margin-bottom: 5px;'>{{title}}</h1><div style='color:#666; font-size:0.9em; margin-bottom:20px; border-bottom:1px solid #ccc; padding-bottom:10px;'>作成日: <time datetime='{{created_at}}'>{{created_at_date}}</time> {{updated_at_text}} {{category_html}} {{tags_html}}</div><div id='md-content'></div></article><div style='display:flex; justify-content:space-between; margin-top:30px; padding-top:20px; border-top:1px solid #eee;'><div>{{prev_link}}</div><div>{{next_link}}</div></div></main>";
+            // カスタムブログレイアウトの適用
+            $blogLayout = $settings['blog_layout'] ?? '';
+            if (trim($blogLayout) === '') {
+                $blogLayout = "<main><article><h1 style='margin-bottom: 5px;'>{{title}}</h1><div style='color:#666; font-size:0.9em; margin-bottom:20px; border-bottom:1px solid #ccc; padding-bottom:10px;'>作成日: <time datetime='{{created_at}}'>{{created_at_date}}</time> {{updated_at_text}} {{category_html}} {{tags_html}}</div><div id='md-content'></div></article><div style='display:flex; justify-content:space-between; margin-top:30px; padding-top:20px; border-top:1px solid #eee;'><div>{{if_prev}}<a href='{{prev_url}}'>&laquo; {{prev_title}}</a>{{/if_prev}}</div><div>{{if_next}}<a href='{{next_url}}'>{{next_title}} &raquo;</a>{{/if_next}}</div></div></main>";
+            }
+
+            if ($prev) {
+                $blogLayout = preg_replace('/\{\{if_prev\}\}(.*?)\{\{\/if_prev\}\}/is', '$1', $blogLayout);
+                $blogLayout = str_replace('{{prev_url}}', "{$baseUrl}blog/".htmlspecialchars($prev['slug']), $blogLayout);
+                $blogLayout = str_replace('{{prev_title}}', htmlspecialchars($prev['title']), $blogLayout);
+            } else {
+                $blogLayout = preg_replace('/\{\{if_prev\}\}(.*?)\{\{\/if_prev\}\}/is', '', $blogLayout);
+            }
+
+            if ($next) {
+                $blogLayout = preg_replace('/\{\{if_next\}\}(.*?)\{\{\/if_next\}\}/is', '$1', $blogLayout);
+                $blogLayout = str_replace('{{next_url}}', "{$baseUrl}blog/".htmlspecialchars($next['slug']), $blogLayout);
+                $blogLayout = str_replace('{{next_title}}', htmlspecialchars($next['title']), $blogLayout);
+            } else {
+                $blogLayout = preg_replace('/\{\{if_next\}\}(.*?)\{\{\/if_next\}\}/is', '', $blogLayout);
             }
 
             $replacePairs = [
@@ -560,14 +658,9 @@ HTML;
                 '{{created_at_date}}' => $cDate,
                 '{{updated_at_text}}' => $upText,
                 '{{category_html}}' => $catHtml,
-                '{{tags_html}}' => $tagsHtml,
-                '{{prev_link}}' => $prevLink,
-                '{{next_link}}' => $nextLink
+                '{{tags_html}}' => $tagsHtml
             ];
-
-            foreach ($replacePairs as $k => $v) {
-                $blogLayout = str_replace($k, $v, $blogLayout);
-            }
+            foreach ($replacePairs as $k => $v) $blogLayout = str_replace($k, $v, $blogLayout);
 
             $blogFormat = $settings['blog_title_format'] ?? '{{title}}';
             $customTitle = str_replace('{{title}}', $article['title'] ?? '', $blogFormat);
@@ -1263,17 +1356,11 @@ HTML;
 
         if ($path === 'cms/backups' && $currentUser['role'] === 'admin') {
             echo $adminHead . "<h1>復元と入出力</h1>";
-            
-            if (isset($_GET['msg']) && $_GET['msg'] === 'imported') {
-                echo "<div class='alert' role='alert'>全データのインポートが完了しました。システムが更新されました。</div>";
-            }
-            
+            if (isset($_GET['msg']) && $_GET['msg'] === 'imported') echo "<div class='alert' role='alert'>全データのインポートが完了しました。システムが更新されました。</div>";
             $backupDir = __DIR__ . '/../data/backups';
-            
             if ($method === 'POST' && !empty($_POST['restore_file']) && !empty($_POST['original_file'])) {
                 $restorePath = $backupDir . '/' . $_POST['restore_file'];
                 $originalPath = __DIR__ . '/../data/' . $_POST['original_file'];
-                
                 if (file_exists($restorePath)) {
                     if (file_exists($originalPath)) {
                         $tempBackup = $backupDir . '/' . dirname($_POST['original_file']) . '/' . date('Ymd_His') . '_prerestore_' . basename($_POST['original_file']);
@@ -1289,14 +1376,12 @@ HTML;
             echo "<section style='margin-bottom: 30px; padding: 20px; border: 1px solid #ced4da; background: #fff; border-radius: 4px;'>";
             echo "<h2 style='margin-top: 0; border-bottom: none;'>全データの入出力 (バックアップ/移行用)</h2>";
             echo "<p style='color: #666; font-size: 0.9em; margin-bottom: 15px;'>現在のシステム内の全データ（ユーザー、記事、設定、テンプレート等）をZIP形式でダウンロードしたり、アップロードして復元することができます。<br>※サーバー負荷・容量削減のため、下部の「世代バックアップデータ」はZIPに含まれません。</p>";
-            
             echo "<div style='display: flex; gap: 20px; align-items: flex-start;'>";
             echo "<div style='flex: 1; border-right: 1px solid #ddd; padding-right: 20px;'>";
             echo "<h3 style='margin-top:0; font-size:1.1rem;'>エクスポート (出力)</h3>";
             echo "<form method='POST' action='{$baseUrl}cms/backups/export' onsubmit='return confirm(\"全データをZIPファイルとしてダウンロードしますか？\");'>";
             echo "<button type='submit' class='btn' style='background:#28a745; width:100%;'>全データをダウンロード (.zip)</button>";
             echo "</form></div>";
-
             echo "<div style='flex: 1; padding-left: 10px;'>";
             echo "<h3 style='margin-top:0; font-size:1.1rem;'>インポート (入力)</h3>";
             echo "<form method='POST' action='{$baseUrl}cms/backups/import' enctype='multipart/form-data' onsubmit='return confirm(\"【重大な警告】\\n現在のシステムのデータが全て上書きされます！\\n元の状態には戻せません。\\n\\n本当にインポートを実行しますか？\");'>";
@@ -1319,21 +1404,13 @@ HTML;
                             $originalBasename = $matches[2];
                             $originalDir = str_replace('\\', '/', dirname($relPath));
                             $originalFile = ($originalDir === '.' ? '' : $originalDir . '/') . $originalBasename;
-                            
                             $time = DateTime::createFromFormat('Ymd_His', $timeStr);
                             $timeFormatted = $time ? $time->format('Y-m-d H:i:s') : $timeStr;
-
-                            $backupFiles[] = [
-                                'backup_file' => $relPath,
-                                'original_file' => $originalFile,
-                                'time' => $timeFormatted,
-                                'timestamp' => $file->getMTime()
-                            ];
+                            $backupFiles[] = [ 'backup_file' => $relPath, 'original_file' => $originalFile, 'time' => $timeFormatted, 'timestamp' => $file->getMTime() ];
                         }
                     }
                 }
             }
-            
             usort($backupFiles, function($a, $b) { return $b['timestamp'] <=> $a['timestamp']; });
             
             echo "<table><thead><tr><th>対象ファイル (元の名前)</th><th>バックアップ日時</th><th>操作</th></tr></thead><tbody>";
@@ -1346,43 +1423,23 @@ HTML;
                 echo "</form></td></tr>";
             }
             if (empty($backupFiles)) echo "<tr><td colspan='3'>バックアップデータはありません。</td></tr>";
-            echo "</tbody></table></main></body></html>";
-            return;
+            echo "</tbody></table></main></body></html>"; return;
         }
 
-        // ==========================================
-        // ユーザー管理
-        // ==========================================
         if ($path === 'cms/users' && $currentUser['role'] === 'admin') {
             $search = $_GET['search'] ?? '';
             $batchMessage = '';
-
             if ($method === 'POST' && !empty($_POST['batch_action']) && !empty($_POST['user_ids'])) {
                 $action = $_POST['batch_action'];
                 foreach ($_POST['user_ids'] as $targetId) {
                     if ($targetId === $currentUser['id']) {
-                        if ($action === 'delete') {
-                            $batchMessage = "※ログイン中の自分自身は削除から除外されました。";
-                            continue;
-                        }
-                        if ($action === 'lock') {
-                            $batchMessage = "※ログイン中の自分自身は一時停止できません。";
-                            continue;
-                        }
+                        if ($action === 'delete') { $batchMessage = "※ログイン中の自分自身は削除から除外されました。"; continue; }
+                        if ($action === 'lock') { $batchMessage = "※ログイン中の自分自身は一時停止できません。"; continue; }
                     }
-                    
-                    if ($action === 'delete') {
-                        $this->userModel->delete($targetId);
-                    } elseif (in_array($action, ['admin', 'special', 'general'])) {
-                        $u = $this->userModel->findById($targetId);
-                        if ($u) { $u['role'] = $action; $this->userModel->save($u); }
-                    } elseif ($action === 'lock') {
-                        $u = $this->userModel->findById($targetId);
-                        if ($u) { $u['is_locked'] = true; $this->userModel->save($u); }
-                    } elseif ($action === 'unlock') {
-                        $u = $this->userModel->findById($targetId);
-                        if ($u) { $u['is_locked'] = false; $this->userModel->save($u); }
-                    }
+                    if ($action === 'delete') $this->userModel->delete($targetId);
+                    elseif (in_array($action, ['admin', 'special', 'general'])) { $u = $this->userModel->findById($targetId); if ($u) { $u['role'] = $action; $this->userModel->save($u); } }
+                    elseif ($action === 'lock') { $u = $this->userModel->findById($targetId); if ($u) { $u['is_locked'] = true; $this->userModel->save($u); } }
+                    elseif ($action === 'unlock') { $u = $this->userModel->findById($targetId); if ($u) { $u['is_locked'] = false; $this->userModel->save($u); } }
                 }
                 $this->writeLog($currentUser, 'Batch Action', "Action: {$action}");
                 if (empty($batchMessage)) { header("Location: {$baseUrl}cms/users"); exit; }
@@ -1645,8 +1702,6 @@ HTML;
                 $this->templateModel->save('header.html', $_POST['header']);
                 $this->templateModel->save('footer.html', $_POST['footer']);
                 $this->templateModel->save('style.css', $_POST['css']);
-                // ★ ブログ記事レイアウトの保存
-                $this->templateModel->save('blog_layout.html', $_POST['blog_layout'] ?? '');
                 
                 $newSettings = $settings;
                 $newSettings['variables'] = $_POST['variables'];
@@ -1656,6 +1711,9 @@ HTML;
                 $newSettings['blog_title_format'] = $_POST['blog_title_format'];
                 $newSettings['page_slash_policy'] = $_POST['page_slash_policy'] ?? 'as_is';
                 $newSettings['blog_slash_policy'] = $_POST['blog_slash_policy'] ?? 'as_is';
+                
+                // ★ ブログ記事レイアウトの保存を追加
+                $newSettings['blog_layout'] = $_POST['blog_layout'] ?? '';
                 
                 if ($currentUser['role'] === 'admin') {
                     $newSettings['backup_retention_count'] = (int)($_POST['backup_retention_count'] ?? 10);
@@ -1721,7 +1779,6 @@ HTML;
             echo "<label>フッター</label><textarea name='footer' style='height:100px; font-family:monospace;'>" . htmlspecialchars($this->templateModel->get('footer.html')) . "</textarea>";
             echo "<label>共通CSS</label><textarea name='css' style='height:150px; font-family:monospace;'>" . htmlspecialchars($this->templateModel->get('style.css')) . "</textarea>";
             
-            // ★ ブログ記事レイアウト編集の追加
             $defaultBlogLayout = <<<HTML
 <main>
     <article>
@@ -1732,13 +1789,20 @@ HTML;
         <div id='md-content'></div>
     </article>
     <div style='display:flex; justify-content:space-between; margin-top:30px; padding-top:20px; border-top:1px solid #eee;'>
-        <div>{{prev_link}}</div>
-        <div>{{next_link}}</div>
+        <div>
+            {{if_prev}}
+                <a href="{{prev_url}}">&laquo; {{prev_title}}</a>
+            {{/if_prev}}
+        </div>
+        <div>
+            {{if_next}}
+                <a href="{{next_url}}">{{next_title}} &raquo;</a>
+            {{/if_next}}
+        </div>
     </div>
 </main>
 HTML;
-            $savedBlogLayout = $this->templateModel->get('blog_layout.html');
-            if (!$savedBlogLayout) $savedBlogLayout = $defaultBlogLayout;
+            $savedBlogLayout = $settings['blog_layout'] ?? $defaultBlogLayout;
             
             echo "<div style='margin-top:20px;'>";
             echo "<label style='font-weight:bold;'>ブログ記事詳細用HTMLテンプレート</label>";
@@ -1838,9 +1902,6 @@ HTML;
             echo "</tbody></table></section></main></body></html>"; return;
         }
 
-        // ==========================================
-        // ★ 記事編集 (Markdownボタン・プレビュー機能の出し分け)
-        // ==========================================
         if ($path === 'cms/contents/edit') {
             $id = $_GET['id'] ?? '';
             $requestedType = $_GET['type'] ?? 'blog';
@@ -1992,7 +2053,6 @@ HTML;
             }
             echo "</fieldset>";
 
-            // ★ ツールバーの出し分け
             $customVars = [];
             $rawVars = $settings['variables'] ?? '';
             $lines = explode("\n", $rawVars);
@@ -2007,21 +2067,19 @@ HTML;
             
             echo "<div style='margin-bottom:10px; padding:10px; background:#f8f9fa; border:1px solid #ced4da; border-radius:4px;'>";
             if ($isPage) {
-                // 通常ページ
                 echo "<strong style='display:block; margin-bottom:5px; font-size:0.9em; color:#555;'>変数挿入 (クリックで挿入)</strong>";
                 echo "<div style='display:flex; flex-wrap:wrap; gap:5px;'>";
-                echo "<button type='button' class='btn var-btn' data-var='{{latest_blogs_5}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>最新ブログ(5件)</button>";
-                echo "<button type='button' class='btn var-btn' data-var='{{latest_blogs_3}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>最新ブログ(3件)</button>";
-                echo "<button type='button' class='btn var-btn' data-var='{{blog_search_form}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>ブログ検索</button>";
+                echo "<button type='button' class='btn var-btn' data-var='{{blogs limit=5}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>最新ブログ(5件)</button>";
+                echo "<button type='button' class='btn var-btn' data-var='{{blogs limit=10 category=news order=desc}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>ブログ詳細指定</button>";
+                echo "<button type='button' class='btn var-btn' data-var='{{blog_search_form}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>ブログ検索窓</button>";
                 if (!empty($settings['site_search_enabled'])) {
-                    echo "<button type='button' class='btn var-btn' data-var='{{site_search_form}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>全体検索</button>";
+                    echo "<button type='button' class='btn var-btn' data-var='{{site_search_form}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>全体検索窓</button>";
                 }
                 foreach ($customVars as $cv) {
                     echo "<button type='button' class='btn var-btn' data-var='{{{$cv}}}' style='padding:4px 8px; font-size:0.85em; background:#ffc107; color:#333;'>{$cv}</button>";
                 }
                 echo "</div>";
             } else {
-                // ブログ
                 echo "<strong style='display:block; margin-bottom:5px; font-size:0.9em; color:#555;'>Markdown入力補助</strong>";
                 echo "<div style='display:flex; flex-wrap:wrap; gap:5px;'>";
                 echo "<button type='button' class='btn md-btn' data-prefix='**' data-suffix='**' style='padding:4px 8px; font-size:0.9em; background:#6c757d;'>太字</button>";
@@ -2042,7 +2100,6 @@ HTML;
             echo "<div style='display:flex; gap:20px; flex-wrap:wrap;'>";
             echo "<textarea id='editor-textarea' name='body' style='flex:1; min-width:300px; height:500px; font-family:monospace;' required>".htmlspecialchars($formData['body'])."</textarea>";
             
-            // ★ プレビューエリア（ブログのみ）
             if (!$isPage) {
                 echo "<div id='preview-container' style='flex:1; min-width:300px; display:flex; flex-direction:column;'>";
                 echo "<div style='background:#007bff; color:#fff; padding:5px 10px; font-size:0.9em; border-radius:4px 4px 0 0;'>リアルタイムプレビュー</div>";
