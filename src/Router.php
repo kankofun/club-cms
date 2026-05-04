@@ -494,6 +494,9 @@ HTML;
         $settings = $this->getSettings();
         $dateField = $settings['blog_date_type'] ?? 'updated_at';
 
+        // ==========================================
+        // ルーティング・末尾スラッシュ・Canonical
+        // ==========================================
         $requestUriPath = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
         $hasTrailingSlash = (substr($requestUriPath, -1) === '/');
         $isHome = ($requestUriPath === '/' || rtrim($requestUriPath, '/') === rtrim($baseUrl, '/'));
@@ -1184,7 +1187,6 @@ HTML;
             
             $uploads = $this->getUploads();
             
-            // ★ 検索機能
             $q = trim($_GET['q'] ?? '');
             if ($q !== '') {
                 $uploads = array_filter($uploads, function($u) use ($q) {
@@ -1193,7 +1195,6 @@ HTML;
                 });
             }
 
-            // ★ ソート機能
             $sort = $_GET['sort'] ?? 'date';
             $order = $_GET['order'] ?? 'desc';
             usort($uploads, function($a, $b) use ($sort, $order) {
@@ -1209,7 +1210,6 @@ HTML;
                 return ($valA > $valB) ? -1 : 1;
             });
 
-            // ★ ページネーション (1ページ20件)
             $p = max(1, (int)($_GET['p'] ?? 1));
             $perPage = 20;
             $total = count($uploads);
@@ -1220,12 +1220,16 @@ HTML;
             $webpEnabled = !empty($settings['upload_webp_enable']) ? 'true' : 'false';
             $maxPx = (int)($settings['upload_max_px'] ?? 1200);
             $webpQuality = ((int)($settings['upload_webp_quality'] ?? 80)) / 100;
+            
+            $allowedExtsStr = htmlspecialchars($settings['upload_allowed_exts'] ?? 'jpg, jpeg, png, gif, webp, pdf, zip, txt');
+            $maxMb = (float)($settings['upload_max_mb'] ?? 5);
+            $maxBytes = $maxMb * 1024 * 1024;
 
             echo $adminHead . "<h1>メディア (ファイル) 管理</h1>";
             
             if ($canUpload) {
                 echo "<fieldset><legend>ファイルをアップロード</legend>";
-                echo "<p style='font-size:0.9em;color:#666;'>※許可された拡張子: " . htmlspecialchars($settings['upload_allowed_exts'] ?? 'jpg, jpeg, png, gif, webp, pdf, zip, txt') . " / 最大サイズ: " . htmlspecialchars($settings['upload_max_mb'] ?? '5') . " MB</p>";
+                echo "<p style='font-size:0.9em;color:#666;'>※許可された拡張子: {$allowedExtsStr} / 最大サイズ: {$maxMb} MB</p>";
                 echo "<div style='display:flex;gap:10px;align-items:center; margin-bottom:10px;'>";
                 echo "<input type='file' id='file-upload-input' style='flex:1;'>";
                 echo "<button type='button' id='btn-upload' class='btn'>アップロード実行</button>";
@@ -1307,7 +1311,20 @@ document.getElementById('btn-upload').addEventListener('click', async () => {
     const webpEnabled = {$webpEnabled};
     const maxPx = {$maxPx};
     const webpQuality = {$webpQuality};
+    const isBypass = bypassRest && bypassRest.checked;
     const skipConvert = bypassConv && bypassConv.checked;
+
+    // ★ クライアントサイドでの事前バリデーション
+    if (!isBypass) {
+        const allowedExts = "{$allowedExtsStr}".split(',').map(e => e.trim().toLowerCase());
+        const ext = file.name.split('.').pop().toLowerCase();
+        if (!allowedExts.includes(ext)) {
+            return alert('許可されていない拡張子です: ' + ext);
+        }
+        if (file.size > {$maxBytes}) {
+            return alert('ファイルサイズが大きすぎます (最大 {$maxMb} MB)');
+        }
+    }
     
     statusDiv.style.display = 'block';
     statusDiv.style.background = '#e9ecef';
@@ -1321,7 +1338,6 @@ document.getElementById('btn-upload').addEventListener('click', async () => {
         statusDiv.textContent = '画像を圧縮・WebPに変換しています...';
         try {
             const convertedBlob = await compressImage(file, maxPx, webpQuality);
-            // ★ 逆効果防止: 圧縮後のファイルサイズが元のサイズより小さければ採用
             if (convertedBlob.size < file.size) {
                 uploadFile = convertedBlob;
                 uploadFileName = file.name.replace(/\.[^/.]+$/, "") + ".webp";
@@ -1339,7 +1355,7 @@ document.getElementById('btn-upload').addEventListener('click', async () => {
     const formData = new FormData();
     formData.append('file', uploadFile, uploadFileName);
     formData.append('action', 'upload');
-    if (bypassRest && bypassRest.checked) formData.append('bypass_restrictions', '1');
+    if (isBypass) formData.append('bypass_restrictions', '1');
 
     try {
         const res = await fetch('{$baseUrl}cms/uploads', { method: 'POST', body: formData });
@@ -1894,8 +1910,15 @@ JS;
             echo "</tbody></table></main></body></html>"; return;
         }
 
+        // ==========================================
+        // ★ ユーザー管理 (ページネーションとソート機能追加)
+        // ==========================================
         if ($path === 'cms/users' && $currentUser['role'] === 'admin') {
             $search = $_GET['search'] ?? '';
+            $sort = $_GET['sort'] ?? 'student_id';
+            $order = $_GET['order'] ?? 'asc';
+            $p = max(1, (int)($_GET['p'] ?? 1));
+            
             $batchMessage = '';
             if ($method === 'POST' && !empty($_POST['batch_action']) && !empty($_POST['user_ids'])) {
                 $action = $_POST['batch_action'];
@@ -1917,27 +1940,83 @@ JS;
             echo $adminHead . "<h1>ユーザー管理</h1>";
             if ($batchMessage) echo "<div class='alert alert-error'>$batchMessage</div>";
 
-            echo "<div style='display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:20px; background:#f8f9fa; padding:15px; border-radius:4px; border:1px solid #dee2e6;'><form method='GET' style='margin:0;'>";
-            echo "<label for='search'>ユーザー検索:</label><br><input type='text' id='search' name='search' value='".htmlspecialchars($search)."' style='width:250px; margin-bottom:0;'> <button type='submit' class='btn'>検索</button>";
-            if ($search) echo " <a href='{$baseUrl}cms/users' style='margin-left:10px;'>クリア</a>";
-            echo "</form><div><a href='{$baseUrl}cms/users/edit' class='btn' style='background:#28a745;'>+ 手動でユーザー登録</a></div></div>";
+            echo "<form method='GET' style='margin-bottom:20px; background:#f8f9fa; padding:15px; border-radius:4px; border:1px solid #dee2e6; display:flex; flex-wrap:wrap; gap:10px; align-items:center;'>";
+            echo "<div><label for='search'>ユーザー検索:</label> <input type='text' id='search' name='search' value='".htmlspecialchars($search)."' style='width:200px; margin-bottom:0;'></div>";
+            echo "<div><label>並べ替え: <select name='sort' style='margin-bottom:0; width:auto;'>";
+            echo "<option value='student_id' ".($sort==='student_id'?'selected':'').">学籍番号/ID</option>";
+            echo "<option value='name' ".($sort==='name'?'selected':'').">名前</option>";
+            echo "<option value='grade' ".($sort==='grade'?'selected':'').">学年</option>";
+            echo "<option value='role' ".($sort==='role'?'selected':'').">権限</option>";
+            echo "<option value='status' ".($sort==='status'?'selected':'').">状態</option>";
+            echo "</select></label> ";
+            echo "<select name='order' style='margin-bottom:0; width:auto;'><option value='asc' ".($order==='asc'?'selected':'').">昇順</option><option value='desc' ".($order==='desc'?'selected':'').">降順</option></select></div>";
+            echo "<div><button type='submit' class='btn'>適用</button> ";
+            if ($search || isset($_GET['sort'])) echo "<a href='{$baseUrl}cms/users' style='margin-left:10px;'>クリア</a>";
+            echo "</div>";
+            echo "<div style='margin-left:auto;'><a href='{$baseUrl}cms/users/edit' class='btn' style='background:#28a745;'>+ 手動でユーザー登録</a></div>";
+            echo "</form>";
             
             echo "<section aria-labelledby='csv-upload-title'><h2 id='csv-upload-title' style='font-size:1.2rem;'>CSVから一括登録</h2><form method='POST' action='{$baseUrl}cms/users/csv_upload' enctype='multipart/form-data'><fieldset>";
             echo "<label for='csv_file'>CSVファイルを選択:</label> <input type='file' id='csv_file' name='csv_file' accept='.csv' required style='margin-right:15px;'>";
-            echo "<label>文字コード: <select name='encoding'><option value='auto'>自動判定</option><option value='SJIS-win'>Shift-JIS (Windows等)</option><option value='UTF-8'>UTF-8</option><option value='EUC-JP'>EUC-JP</option></select></label> ";
+            echo "<label>文字コード: <select name='encoding' style='width:auto;'><option value='auto'>自動判定</option><option value='SJIS-win'>Shift-JIS (Windows等)</option><option value='UTF-8'>UTF-8</option><option value='EUC-JP'>EUC-JP</option></select></label> ";
             echo "<button type='submit' class='btn' style='margin-left:15px;'>読込・列指定へ</button></fieldset></form></section>";
             
             $users = $this->userModel->getAll();
             if ($search) $users = array_filter($users, function($u) use ($search) { return (stripos($u['student_id'] ?? '', $search) !== false) || (stripos($u['name'] ?? '', $search) !== false); });
             
-            echo "<section aria-labelledby='user-list-title'><h2 id='user-list-title' style='font-size:1.2rem;'>ユーザー一覧</h2><form method='POST'><div style='margin-bottom:10px;'><select name='batch_action' required><option value=''>-- 選択 --</option><option value='admin'>管理者にする</option><option value='special'>特別部員にする</option><option value='general'>一般部員にする</option><option value='lock'>アカウントを一時停止する</option><option value='unlock'>アカウントの停止を解除する</option><option value='delete'>削除する</option></select> <button type='submit' class='btn'>一括適用</button></div>";
-            echo "<table><thead><tr><th><input type='checkbox' onclick=\"document.querySelectorAll('input[name^=user_ids]').forEach(cb => cb.checked = this.checked)\"></th><th>学籍番号/ID</th><th>名前</th><th>学年</th><th>権限</th><th>状態</th><th>操作</th></tr></thead><tbody>";
-            foreach ($users as $u) {
-                $grade = !empty($u['grade']) ? $u['grade'] : $this->userModel->calculateGrade($u['student_id']);
-                $status = !empty($u['is_locked']) ? "<span style='color:#dc3545; font-weight:bold;'>停止中</span>" : "<span style='color:#28a745;'>有効</span>";
-                echo "<tr><td><input type='checkbox' name='user_ids[]' value='" . htmlspecialchars($u['id']) . "'></td><td>" . htmlspecialchars($u['student_id']) . "</td><td>" . htmlspecialchars($u['name'] ?? '') . "</td><td>" . htmlspecialchars($grade) . "</td><td>" . htmlspecialchars($u['role']) . "</td><td>{$status}</td><td><a href='{$baseUrl}cms/users/edit?id=" . urlencode($u['id']) . "'>編集</a></td></tr>";
+            foreach ($users as &$u) {
+                $u['_grade'] = !empty($u['grade']) ? $u['grade'] : $this->userModel->calculateGrade($u['student_id']);
+                $u['_status'] = !empty($u['is_locked']) ? 1 : 0;
             }
-            echo "</tbody></table></form></section></main></body></html>"; return;
+            unset($u);
+
+            usort($users, function($a, $b) use ($sort, $order) {
+                $valA = ''; $valB = '';
+                if ($sort === 'student_id') { $valA = $a['student_id']; $valB = $b['student_id']; }
+                elseif ($sort === 'name') { $valA = $a['name']; $valB = $b['name']; }
+                elseif ($sort === 'grade') { $valA = $a['_grade']; $valB = $b['_grade']; }
+                elseif ($sort === 'role') {
+                    $roles = ['admin'=>1, 'special'=>2, 'general'=>3];
+                    $valA = $roles[$a['role']] ?? 99; $valB = $roles[$b['role']] ?? 99;
+                }
+                elseif ($sort === 'status') { $valA = $a['_status']; $valB = $b['_status']; }
+                
+                if ($valA == $valB) return 0;
+                if ($order === 'asc') return ($valA < $valB) ? -1 : 1;
+                return ($valA > $valB) ? -1 : 1;
+            });
+
+            $perPage = 50;
+            $total = count($users);
+            $maxPage = max(1, ceil($total / $perPage));
+            if ($p > $maxPage) $p = $maxPage;
+            $pagedUsers = array_slice($users, ($p - 1) * $perPage, $perPage);
+            
+            echo "<section aria-labelledby='user-list-title'><h2 id='user-list-title' style='font-size:1.2rem;'>ユーザー一覧</h2><form method='POST'>";
+            echo "<div style='display:flex; justify-content:space-between; margin-bottom:10px; align-items:center;'>";
+            echo "<div><select name='batch_action' required style='width:auto;'><option value=''>-- 選択 --</option><option value='admin'>管理者にする</option><option value='special'>特別部員にする</option><option value='general'>一般部員にする</option><option value='lock'>アカウントを一時停止する</option><option value='unlock'>アカウントの停止を解除する</option><option value='delete'>削除する</option></select> <button type='submit' class='btn'>一括適用</button></div>";
+            echo "<div style='font-size:0.9em; color:#666;'>全 {$total} 件中 ".(($p-1)*$perPage+1)." - ".min($total, $p*$perPage)." 件を表示</div>";
+            echo "</div>";
+            
+            echo "<table><thead><tr><th><input type='checkbox' onclick=\"document.querySelectorAll('input[name^=user_ids]').forEach(cb => cb.checked = this.checked)\"></th><th>学籍番号/ID</th><th>名前</th><th>学年</th><th>権限</th><th>状態</th><th>操作</th></tr></thead><tbody>";
+            foreach ($pagedUsers as $u) {
+                $status = $u['_status'] ? "<span style='color:#dc3545; font-weight:bold;'>停止中</span>" : "<span style='color:#28a745;'>有効</span>";
+                echo "<tr><td><input type='checkbox' name='user_ids[]' value='" . htmlspecialchars($u['id']) . "'></td><td>" . htmlspecialchars($u['student_id']) . "</td><td>" . htmlspecialchars($u['name'] ?? '') . "</td><td>" . htmlspecialchars($u['_grade']) . "</td><td>" . htmlspecialchars($u['role']) . "</td><td>{$status}</td><td><a href='{$baseUrl}cms/users/edit?id=" . urlencode($u['id']) . "'>編集</a></td></tr>";
+            }
+            if (empty($pagedUsers)) echo "<tr><td colspan='7'>ユーザーがいません。</td></tr>";
+            echo "</tbody></table></form>";
+
+            if ($maxPage > 1) {
+                echo "<div style='margin-top:20px; display:flex; gap:5px; justify-content:center;'>";
+                for ($i = 1; $i <= $maxPage; $i++) {
+                    $qStr = http_build_query(['search'=>$search, 'sort'=>$sort, 'order'=>$order, 'p'=>$i]);
+                    if ($i === $p) echo "<span style='padding:5px 10px; background:#007bff; color:#fff; border-radius:3px;'>{$i}</span>";
+                    else echo "<a href='{$baseUrl}cms/users?{$qStr}' style='padding:5px 10px; background:#e9ecef; text-decoration:none; color:#333; border-radius:3px;'>{$i}</a>";
+                }
+                echo "</div>";
+            }
+
+            echo "</section></main></body></html>"; return;
         }
 
         if ($path === 'cms/users/edit' && $currentUser['role'] === 'admin') {
