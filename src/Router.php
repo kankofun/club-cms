@@ -63,6 +63,8 @@ class Router {
     private function replaceVariables($text, $baseUrl) {
         if (!is_string($text) || $text === '') return '';
         $settings = $this->getSettings();
+        $dateField = $settings['blog_date_type'] ?? 'updated_at';
+        $categories = $this->contentModel->getCategories();
         
         // 1. カスタム変数の置換
         $rawVars = $settings['variables'] ?? '';
@@ -74,13 +76,11 @@ class Router {
             $text = str_replace('{{' . trim($k) . '}}', trim($v), $text);
         }
 
-        // 2. ブログ検索フォーム置換
+        // 2. ブログ検索・全体検索フォーム
         if (strpos($text, '{{blog_search_form}}') !== false) {
             $formHtml = "<form action='{$baseUrl}blogs' method='GET' style='display:flex;gap:5px;margin-bottom:15px;'><input type='text' name='q' placeholder='ブログを検索...' required style='padding:5px; flex:1;'><button type='submit' style='padding:5px 10px;cursor:pointer;'>検索</button></form>";
             $text = str_replace('{{blog_search_form}}', $formHtml, $text);
         }
-
-        // 3. サイト全体検索フォーム置換
         if (strpos($text, '{{site_search_form}}') !== false) {
             if (!empty($settings['site_search_enabled'])) {
                 $formHtml = "<form action='{$baseUrl}search' method='GET' style='display:flex;gap:5px;margin-bottom:15px;'><input type='text' name='q' placeholder='サイト内を検索...' required style='padding:5px; flex:1;'><button type='submit' style='padding:5px 10px;cursor:pointer;'>検索</button></form>";
@@ -90,12 +90,53 @@ class Router {
             }
         }
 
+        // 3. 各種リスト機能
+        if (strpos($text, '{{blog_categories}}') !== false) {
+            if (!empty($settings['blog_category_enabled'])) {
+                $html = "<ul class='blog-categories-list' style='list-style:none; padding:0;'>";
+                foreach ($categories as $c) {
+                    $html .= "<li style='margin-bottom:5px;'><a href='{$baseUrl}blogs?category={$c['id']}'>".htmlspecialchars($c['name'])."</a></li>";
+                }
+                $html .= "</ul>";
+                $text = str_replace('{{blog_categories}}', $html, $text);
+            } else { $text = str_replace('{{blog_categories}}', '', $text); }
+        }
+        if (strpos($text, '{{blog_tags}}') !== false) {
+            if (!empty($settings['blog_tag_enabled'])) {
+                $tags = $this->contentModel->getAllTags();
+                $html = "<div class='blog-tags-list' style='display:flex; flex-wrap:wrap; gap:5px;'>";
+                foreach ($tags as $t) {
+                    $html .= "<a href='{$baseUrl}blogs?tag=".urlencode($t)."' style='background:#e2e3e5; padding:2px 8px; border-radius:10px; text-decoration:none; color:#333; font-size:0.9em;'>#".htmlspecialchars($t)."</a>";
+                }
+                $html .= "</div>";
+                $text = str_replace('{{blog_tags}}', $html, $text);
+            } else { $text = str_replace('{{blog_tags}}', '', $text); }
+        }
+        if (strpos($text, '{{blog_archives}}') !== false) {
+            $allBlogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
+            $archives = [];
+            foreach ($allBlogs as $b) {
+                $bDate = !empty($b[$dateField]) ? $b[$dateField] : ($b['updated_at'] ?? 'now');
+                $m = date('Y-m', strtotime($bDate));
+                if (!isset($archives[$m])) $archives[$m] = 0;
+                $archives[$m]++;
+            }
+            krsort($archives);
+            $html = "<ul class='blog-archives-list' style='list-style:none; padding:0;'>";
+            foreach ($archives as $m => $cnt) {
+                $mName = date('Y年n月', strtotime($m . '-01'));
+                $html .= "<li style='margin-bottom:5px;'><a href='{$baseUrl}blogs?month={$m}'>{$mName} ({$cnt})</a></li>";
+            }
+            $html .= "</ul>";
+            $text = str_replace('{{blog_archives}}', $html, $text);
+        }
+
         // 旧互換
         $text = str_replace('{{latest_blogs}}', '{{blogs limit=5}}', $text);
         $text = preg_replace('/\{\{latest_blogs_(\d+)\}\}/', '{{blogs limit=$1}}', $text);
 
-        // 4. カスタム可能なブログリスト展開: {{blogs limit=5 category=xxx tag=yyy order=desc sort=date}}
-        $text = preg_replace_callback('/\{\{blogs\s*(.*?)\}\}/', function($m) use ($baseUrl) {
+        // 4. カスタム可能なブログリスト展開: {{blogs limit=5 category=xxx tag=yyy order=desc sort=date archive=true}}
+        $text = preg_replace_callback('/\{\{blogs\s*(.*?)\}\}/', function($m) use ($baseUrl, $settings, $dateField, $categories) {
             $attrStr = trim($m[1]);
             $args = [];
             if (preg_match_all('/(\w+)=([^\s]+)/', $attrStr, $matches, PREG_SET_ORDER)) {
@@ -107,6 +148,7 @@ class Router {
             $tag = $args['tag'] ?? '';
             $order = $args['order'] ?? 'desc';
             $sort = $args['sort'] ?? 'date';
+            $showArchive = isset($args['archive']) && $args['archive'] === 'true';
             
             $blogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
             
@@ -117,9 +159,11 @@ class Router {
                 $filteredBlogs[] = $b;
             }
 
-            usort($filteredBlogs, function($a, $b) use ($sort, $order) {
-                $valA = strtotime($a['updated_at']);
-                $valB = strtotime($b['updated_at']);
+            usort($filteredBlogs, function($a, $b) use ($sort, $order, $dateField) {
+                $aDate = !empty($a[$dateField]) ? $a[$dateField] : ($a['updated_at'] ?? 'now');
+                $bDate = !empty($b[$dateField]) ? $b[$dateField] : ($b['updated_at'] ?? 'now');
+                $valA = strtotime($aDate);
+                $valB = strtotime($bDate);
                 if ($valA == $valB) return 0;
                 if ($order === 'asc') return ($valA < $valB) ? -1 : 1;
                 return ($valA > $valB) ? -1 : 1;
@@ -130,10 +174,55 @@ class Router {
             
             $html = "<ul class='latest-blogs' style='list-style:none; padding:0;'>";
             foreach ($pagedBlogs as $blog) {
-                $date = date('Y.m.d', strtotime($blog['updated_at']));
-                $html .= "<li style='margin-bottom:8px;'><span style='color:#666; font-size:0.9em; margin-right:10px;'>{$date}</span> <a href='{$baseUrl}blog/" . htmlspecialchars($blog['slug'] ?? '') . "'>" . htmlspecialchars($blog['title']) . "</a></li>";
+                $bDate = !empty($blog[$dateField]) ? $blog[$dateField] : ($blog['updated_at'] ?? 'now');
+                $dateStr = date('Y.m.d', strtotime($bDate));
+                $html .= "<li style='margin-bottom:15px; padding-bottom:15px; border-bottom:1px solid #eee;'>";
+                $html .= "<div style='margin-bottom:5px;'><span style='color:#666; font-size:0.9em; margin-right:10px;'>{$dateStr}</span> ";
+                
+                if (!empty($settings['blog_category_enabled']) && !empty($blog['category_id'])) {
+                    foreach($categories as $c) {
+                        if($c['id'] === $blog['category_id']) {
+                            $color = !empty($c['color']) ? $c['color'] : '#007bff';
+                            $html .= "<span style='background:{$color}; color:#fff; padding:2px 6px; border-radius:3px; font-size:0.8em; margin-right:10px;'><a href='{$baseUrl}blogs?category={$c['id']}' style='color:#fff;text-decoration:none;'>".htmlspecialchars($c['name'])."</a></span>";
+                            break;
+                        }
+                    }
+                }
+                $html .= "</div>";
+                $html .= "<a href='{$baseUrl}blog/" . htmlspecialchars($blog['slug'] ?? '') . "' style='font-size:1.2em; font-weight:bold; text-decoration:none; color:#0056b3;'>" . htmlspecialchars($blog['title']) . "</a>";
+                if (!empty($settings['blog_tag_enabled']) && !empty($blog['tags'])) {
+                    $html .= "<div style='margin-top:8px; font-size:0.85em; color:#666;'>";
+                    foreach ($blog['tags'] as $t) $html .= "<a href='{$baseUrl}blogs?tag=".urlencode($t)."' style='display:inline-block; background:#e2e3e5; padding:2px 8px; border-radius:10px; text-decoration:none; color:#333; margin-right:5px;'>#".htmlspecialchars($t)."</a>";
+                    $html .= "</div>";
+                }
+                $html .= "</li>";
             }
             $html .= "</ul>";
+
+            if ($showArchive) {
+                $olderBlogs = array_slice($filteredBlogs, $limit);
+                if (!empty($olderBlogs)) {
+                    $groupedOlder = [];
+                    foreach ($olderBlogs as $b) {
+                        $bDate = !empty($b[$dateField]) ? $b[$dateField] : ($b['updated_at'] ?? 'now');
+                        $m = date('Y年n月', strtotime($bDate));
+                        $groupedOlder[$m][] = $b;
+                    }
+                    $html .= "<div class='blog-archive-accordion'>";
+                    foreach ($groupedOlder as $mName => $mBlogs) {
+                        $html .= "<details style='margin-bottom:10px;'><summary style='cursor:pointer; font-weight:bold; background:#f8f9fa; padding:10px; border:1px solid #dee2e6;'>{$mName} (".count($mBlogs)."件)</summary>";
+                        $html .= "<ul style='padding:10px 20px; border:1px solid #dee2e6; border-top:none; margin:0; list-style:none;'>";
+                        foreach ($mBlogs as $blog) {
+                            $bDate = !empty($blog[$dateField]) ? $blog[$dateField] : ($blog['updated_at'] ?? 'now');
+                            $dateStr = date('Y.m.d', strtotime($bDate));
+                            $html .= "<li style='margin-bottom:8px;'><span style='color:#666; font-size:0.9em; margin-right:10px;'>{$dateStr}</span> <a href='{$baseUrl}blog/" . htmlspecialchars($blog['slug'] ?? '') . "'>" . htmlspecialchars($blog['title']) . "</a></li>";
+                        }
+                        $html .= "</ul></details>";
+                    }
+                    $html .= "</div>";
+                }
+            }
+
             return $html;
         }, $text);
 
@@ -225,7 +314,7 @@ class Router {
     table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
     th, td { border: 1px solid var(--border); padding: 12px; text-align: left; }
     th { background: #f8f9fa; }
-    input[type="text"], input[type="password"], select, textarea, input[type="email"], input[type="number"] { width: 100%; padding: 10px; margin-top: 5px; margin-bottom: 15px; border: 1px solid #ced4da; border-radius: 4px; box-sizing: border-box; font-family: inherit; }
+    input[type="text"], input[type="password"], select, textarea, input[type="email"], input[type="number"], input[type="color"] { width: 100%; padding: 10px; margin-top: 5px; margin-bottom: 15px; border: 1px solid #ced4da; border-radius: 4px; box-sizing: border-box; font-family: inherit; }
     button, .btn { display: inline-block; background: var(--primary); color: #fff; text-decoration: none; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
     button:hover, .btn:hover { background: #0056b3; }
     .tree-indent { display: inline-block; width: 20px; color: #adb5bd; }
@@ -264,6 +353,7 @@ HTML;
         $baseUrl = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/\\');
         $baseUrl = $baseUrl === '' ? '/' : $baseUrl . '/';
         $settings = $this->getSettings();
+        $dateField = $settings['blog_date_type'] ?? 'updated_at';
 
         // ==========================================
         // ルーティング・末尾スラッシュ・Canonical
@@ -343,7 +433,6 @@ HTML;
             $cleanPath = 'blogs'; 
         }
 
-        // ★ 全体検索機能
         if ($cleanPath === 'search') {
             if (empty($settings['site_search_enabled'])) $this->renderErrorPage(404, $baseUrl, "検索機能は無効です。");
             $q = trim($_GET['q'] ?? '');
@@ -369,9 +458,16 @@ HTML;
                 }
             }
 
-            usort($results, function($a, $b) use ($sort, $order) {
-                $valA = ($sort === 'score') ? $a['score'] : strtotime($a['updated_at']);
-                $valB = ($sort === 'score') ? $b['score'] : strtotime($b['updated_at']);
+            usort($results, function($a, $b) use ($sort, $order, $dateField) {
+                if ($sort === 'score') {
+                    $valA = $a['score'];
+                    $valB = $b['score'];
+                } else {
+                    $aDate = !empty($a[$dateField]) ? $a[$dateField] : ($a['updated_at'] ?? 'now');
+                    $bDate = !empty($b[$dateField]) ? $b[$dateField] : ($b['updated_at'] ?? 'now');
+                    $valA = strtotime($aDate);
+                    $valB = strtotime($bDate);
+                }
                 if ($valA == $valB) return 0;
                 if ($order === 'asc') return ($valA < $valB) ? -1 : 1;
                 return ($valA > $valB) ? -1 : 1;
@@ -426,7 +522,6 @@ HTML;
             return;
         }
 
-        // ★ ブログ一覧（ページネーション＆並び替え強化）
         if ($cleanPath === 'blogs') {
             $q = trim($_GET['q'] ?? '');
             $catId = trim($_GET['category'] ?? '');
@@ -437,16 +532,19 @@ HTML;
             $order = $_GET['order'] ?? 'desc';
 
             $allBlogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
+
             $archives = [];
             foreach ($allBlogs as $b) {
-                $m = date('Y-m', strtotime($b['updated_at']));
+                $bDate = !empty($b[$dateField]) ? $b[$dateField] : ($b['updated_at'] ?? 'now');
+                $m = date('Y-m', strtotime($bDate));
                 if (!isset($archives[$m])) $archives[$m] = 0;
                 $archives[$m]++;
             }
 
             $filteredBlogs = [];
             foreach ($allBlogs as $b) {
-                if ($month && date('Y-m', strtotime($b['updated_at'])) !== $month) continue;
+                $bDate = !empty($b[$dateField]) ? $b[$dateField] : ($b['updated_at'] ?? 'now');
+                if ($month && date('Y-m', strtotime($bDate)) !== $month) continue;
                 if ($catId && ($b['category_id'] ?? '') !== $catId) continue;
                 if ($tag && (!isset($b['tags']) || !is_array($b['tags']) || !in_array($tag, $b['tags']))) continue;
                 
@@ -464,9 +562,16 @@ HTML;
                 $filteredBlogs[] = $b;
             }
 
-            usort($filteredBlogs, function($a, $b) use ($sort, $order) {
-                $valA = ($sort === 'score') ? $a['score'] : strtotime($a['updated_at']);
-                $valB = ($sort === 'score') ? $b['score'] : strtotime($b['updated_at']);
+            usort($filteredBlogs, function($a, $b) use ($sort, $order, $dateField) {
+                if ($sort === 'score') {
+                    $valA = $a['score'];
+                    $valB = $b['score'];
+                } else {
+                    $aDate = !empty($a[$dateField]) ? $a[$dateField] : ($a['updated_at'] ?? 'now');
+                    $bDate = !empty($b[$dateField]) ? $b[$dateField] : ($b['updated_at'] ?? 'now');
+                    $valA = strtotime($aDate);
+                    $valB = strtotime($bDate);
+                }
                 if ($valA == $valB) return 0;
                 if ($order === 'asc') return ($valA < $valB) ? -1 : 1;
                 return ($valA > $valB) ? -1 : 1;
@@ -520,14 +625,16 @@ HTML;
 
                 echo "<ul style='list-style:none; padding:0;'>";
                 foreach ($pagedBlogs as $blog) {
-                    $date = date('Y.m.d', strtotime($blog['updated_at']));
+                    $bDate = !empty($blog[$dateField]) ? $blog[$dateField] : ($blog['updated_at'] ?? 'now');
+                    $dateStr = date('Y.m.d', strtotime($bDate));
                     echo "<li style='margin-bottom:20px; padding-bottom:15px; border-bottom:1px solid #eee;'>";
-                    echo "<div style='margin-bottom:5px;'><span style='color:#666; font-size:0.9em; margin-right:10px;'>{$date}</span> ";
+                    echo "<div style='margin-bottom:5px;'><span style='color:#666; font-size:0.9em; margin-right:10px;'>{$dateStr}</span> ";
                     
                     if (!empty($settings['blog_category_enabled']) && !empty($blog['category_id'])) {
                         foreach($categories as $c) {
                             if($c['id'] === $blog['category_id']) {
-                                echo "<span style='background:#007bff; color:#fff; padding:2px 6px; border-radius:3px; font-size:0.8em; margin-right:10px;'><a href='{$baseUrl}blogs?category={$c['id']}' style='color:#fff;text-decoration:none;'>".htmlspecialchars($c['name'])."</a></span>";
+                                $color = !empty($c['color']) ? $c['color'] : '#007bff';
+                                echo "<span style='background:{$color}; color:#fff; padding:2px 6px; border-radius:3px; font-size:0.8em; margin-right:10px;'><a href='{$baseUrl}blogs?category={$c['id']}' style='color:#fff;text-decoration:none;'>".htmlspecialchars($c['name'])."</a></span>";
                                 break;
                             }
                         }
@@ -575,6 +682,7 @@ HTML;
             if (!empty($archives)) {
                 echo "<div style='background:#f8f9fa; padding:15px; border-radius:4px; margin-bottom:20px;'>";
                 echo "<h3 style='margin-top:0;'>月別アーカイブ</h3><ul style='list-style:none; padding:0;'>";
+                krsort($archives);
                 foreach ($archives as $m => $cnt) {
                     $mName = date('Y年n月', strtotime($m . '-01'));
                     echo "<li style='margin-bottom:5px;'><a href='{$baseUrl}blogs?month={$m}'>{$mName} ({$cnt})</a></li>";
@@ -588,13 +696,16 @@ HTML;
             return;
         }
 
-        // ★ ブログ記事詳細
         if (preg_match('#^blog/([^/]+)$#', $cleanPath, $matches)) {
             $article = $this->contentModel->getBySlug($matches[1], 'blog');
             if (!$article) $this->renderErrorPage(404, $baseUrl, "お探しの記事は見つかりませんでした。");
 
             $allBlogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
-            usort($allBlogs, function($a, $b) { return strtotime($b['updated_at']) < strtotime($a['updated_at']) ? 1 : -1; });
+            usort($allBlogs, function($a, $b) use ($dateField) {
+                $aDate = !empty($a[$dateField]) ? $a[$dateField] : ($a['updated_at'] ?? 'now');
+                $bDate = !empty($b[$dateField]) ? $b[$dateField] : ($b['updated_at'] ?? 'now');
+                return strtotime($bDate) <=> strtotime($aDate);
+            });
             
             $prev = null; $next = null;
             $allBlogsValues = array_values($allBlogs);
@@ -606,18 +717,19 @@ HTML;
                 }
             }
 
-            $createdAt = !empty($article['created_at']) ? $article['created_at'] : ($article['updated_at'] ?? 'now');
-            $updatedAt = $article['updated_at'] ?? 'now';
-            $cDate = date('Y.m.d H:i', strtotime($createdAt));
-            $uDate = date('Y.m.d H:i', strtotime($updatedAt));
-            $upText = ($cDate !== $uDate) ? "<span style='margin-left:10px;'>(更新日: <time datetime='".htmlspecialchars($updatedAt)."'>{$uDate}</time>)</span>" : "";
+            $aDateRaw = !empty($article[$dateField]) ? $article[$dateField] : ($article['updated_at'] ?? 'now');
+            $cDate = date('Y.m.d H:i', strtotime($aDateRaw));
+            
+            $realUpdated = date('Y.m.d H:i', strtotime($article['updated_at'] ?? 'now'));
+            $upText = ($cDate !== $realUpdated && $dateField === 'created_at') ? "<span style='margin-left:10px;'>(更新日: <time datetime='".htmlspecialchars($article['updated_at'])."'>{$realUpdated}</time>)</span>" : "";
 
             $catHtml = '';
             if (!empty($settings['blog_category_enabled']) && !empty($article['category_id'])) {
                 $categories = $this->contentModel->getCategories();
                 foreach($categories as $c) {
                     if($c['id'] === $article['category_id']) {
-                        $catHtml = "<span style='background:#007bff; color:#fff; padding:2px 6px; border-radius:3px; font-size:0.8em; margin-left:10px;'><a href='{$baseUrl}blogs?category={$c['id']}' style='color:#fff;text-decoration:none;'>".htmlspecialchars($c['name'])."</a></span>";
+                        $color = !empty($c['color']) ? $c['color'] : '#007bff';
+                        $catHtml = "<span style='background:{$color}; color:#fff; padding:2px 6px; border-radius:3px; font-size:0.8em; margin-left:10px;'><a href='{$baseUrl}blogs?category={$c['id']}' style='color:#fff;text-decoration:none;'>".htmlspecialchars($c['name'])."</a></span>";
                         break;
                     }
                 }
@@ -630,7 +742,6 @@ HTML;
                 }
             }
 
-            // カスタムブログレイアウトの適用
             $blogLayout = $settings['blog_layout'] ?? '';
             if (trim($blogLayout) === '') {
                 $blogLayout = "<main><article><h1 style='margin-bottom: 5px;'>{{title}}</h1><div style='color:#666; font-size:0.9em; margin-bottom:20px; border-bottom:1px solid #ccc; padding-bottom:10px;'>作成日: <time datetime='{{created_at}}'>{{created_at_date}}</time> {{updated_at_text}} {{category_html}} {{tags_html}}</div><div id='md-content'></div></article><div style='display:flex; justify-content:space-between; margin-top:30px; padding-top:20px; border-top:1px solid #eee;'><div>{{if_prev}}<a href='{{prev_url}}'>&laquo; {{prev_title}}</a>{{/if_prev}}</div><div>{{if_next}}<a href='{{next_url}}'>{{next_title}} &raquo;</a>{{/if_next}}</div></div></main>";
@@ -654,7 +765,7 @@ HTML;
 
             $replacePairs = [
                 '{{title}}' => htmlspecialchars($article['title']),
-                '{{created_at}}' => htmlspecialchars($createdAt),
+                '{{created_at}}' => htmlspecialchars($aDateRaw),
                 '{{created_at_date}}' => $cDate,
                 '{{updated_at_text}}' => $upText,
                 '{{category_html}}' => $catHtml,
@@ -1668,25 +1779,34 @@ HTML;
         }
 
         // ==========================================
-        // カテゴリ管理
+        // ★ カテゴリ管理 (色設定を追加)
         // ==========================================
         if ($path === 'cms/categories' && $isAdminOrSpecial) {
             if ($method === 'POST') {
                 if (isset($_POST['delete_id'])) {
                     $this->contentModel->deleteCategory($_POST['delete_id']);
                 } else {
-                    $this->contentModel->saveCategory(['id' => $_POST['id']??'', 'name' => trim($_POST['name']??'')]);
+                    $this->contentModel->saveCategory([
+                        'id' => $_POST['id']??'', 
+                        'name' => trim($_POST['name']??''),
+                        'color' => $_POST['color'] ?? '#007bff'
+                    ]);
                 }
                 header("Location: {$baseUrl}cms/categories"); exit;
             }
             
             echo $adminHead . "<h1>カテゴリ管理</h1>";
-            echo "<fieldset><legend>新規作成</legend><form method='POST' style='display:flex;gap:10px;'><input type='text' name='name' placeholder='カテゴリ名' required style='margin-bottom:0;'><button type='submit' class='btn'>追加</button></form></fieldset>";
+            echo "<fieldset><legend>新規作成</legend><form method='POST' style='display:flex;gap:10px;align-items:center;'>";
+            echo "<input type='color' name='color' value='#007bff' style='width:50px;height:40px;padding:0;cursor:pointer;' title='カテゴリの色'>";
+            echo "<input type='text' name='name' placeholder='カテゴリ名' required style='margin-bottom:0;'><button type='submit' class='btn'>追加</button></form></fieldset>";
             
             $cats = $this->contentModel->getCategories();
             echo "<table><thead><tr><th>カテゴリ名</th><th>操作</th></tr></thead><tbody>";
             foreach ($cats as $c) {
-                echo "<tr><td><form method='POST' style='margin:0;display:flex;gap:10px;'><input type='hidden' name='id' value='{$c['id']}'><input type='text' name='name' value='".htmlspecialchars($c['name'])."' required style='margin-bottom:0;'><button type='submit' class='btn' style='padding:5px 10px; font-size:0.9em;'>更新</button></form></td>";
+                $col = htmlspecialchars($c['color'] ?? '#007bff');
+                echo "<tr><td><form method='POST' style='margin:0;display:flex;gap:10px;align-items:center;'><input type='hidden' name='id' value='{$c['id']}'>";
+                echo "<input type='color' name='color' value='{$col}' style='width:50px;height:40px;padding:0;cursor:pointer;'>";
+                echo "<input type='text' name='name' value='".htmlspecialchars($c['name'])."' required style='margin-bottom:0;'><button type='submit' class='btn' style='padding:5px 10px; font-size:0.9em;'>更新</button></form></td>";
                 echo "<td><form method='POST' style='margin:0;' onsubmit='return confirm(\"削除しますか？\");'><input type='hidden' name='delete_id' value='{$c['id']}'><button type='submit' class='btn' style='background:#dc3545; padding:5px 10px; font-size:0.9em;'>削除</button></form></td></tr>";
             }
             if (empty($cats)) echo "<tr><td colspan='2'>カテゴリはまだありません。</td></tr>";
@@ -1694,7 +1814,7 @@ HTML;
         }
 
         // ==========================================
-        // システム設定・テンプレート
+        // ★ システム設定・テンプレート (日付基準などを追加)
         // ==========================================
         if ($path === 'cms/templates' && $isAdminOrSpecial) {
             $message = '';
@@ -1711,8 +1831,6 @@ HTML;
                 $newSettings['blog_title_format'] = $_POST['blog_title_format'];
                 $newSettings['page_slash_policy'] = $_POST['page_slash_policy'] ?? 'as_is';
                 $newSettings['blog_slash_policy'] = $_POST['blog_slash_policy'] ?? 'as_is';
-                
-                // ★ ブログ記事レイアウトの保存を追加
                 $newSettings['blog_layout'] = $_POST['blog_layout'] ?? '';
                 
                 if ($currentUser['role'] === 'admin') {
@@ -1723,6 +1841,7 @@ HTML;
                     $newSettings['blog_tag_enabled'] = !empty($_POST['blog_tag_enabled']);
                     $newSettings['blog_latest_count'] = (int)($_POST['blog_latest_count'] ?? 5);
                     $newSettings['site_search_enabled'] = !empty($_POST['site_search_enabled']);
+                    $newSettings['blog_date_type'] = $_POST['blog_date_type'] ?? 'updated_at';
                 }
                 
                 $this->saveSettings($newSettings);
@@ -1741,6 +1860,9 @@ HTML;
                 echo "<label><input type='checkbox' name='blog_category_enabled' value='1' ".(!empty($settings['blog_category_enabled'])?'checked':'')."> カテゴリ機能を有効にする</label><br>";
                 echo "<label><input type='checkbox' name='blog_category_required' value='1' ".(!empty($settings['blog_category_required'])?'checked':'')."> 記事作成時にカテゴリ付けを必須にする</label><br><br>";
                 echo "<label><input type='checkbox' name='blog_tag_enabled' value='1' ".(!empty($settings['blog_tag_enabled'])?'checked':'')."> タグ機能を有効にする</label><br><br>";
+                
+                $dt = $settings['blog_date_type'] ?? 'updated_at';
+                echo "<label>ブログの基準日時: <select name='blog_date_type' style='width:auto; display:inline-block;'><option value='updated_at' ".($dt==='updated_at'?'selected':'').">更新日時</option><option value='created_at' ".($dt==='created_at'?'selected':'').">作成日時</option></select></label><br><br>";
                 echo "<label>最新記事として独立表示する件数: <input type='number' name='blog_latest_count' value='".htmlspecialchars($settings['blog_latest_count'] ?? 5)."' min='1' max='50' style='width:80px; display:inline-block;'></label>";
                 echo "</fieldset>";
 
@@ -1803,10 +1925,11 @@ HTML;
 </main>
 HTML;
             $savedBlogLayout = $settings['blog_layout'] ?? $defaultBlogLayout;
+            if (trim($savedBlogLayout) === '') $savedBlogLayout = $defaultBlogLayout;
             
             echo "<div style='margin-top:20px;'>";
             echo "<label style='font-weight:bold;'>ブログ記事詳細用HTMLテンプレート</label>";
-            echo "<p style='font-size:0.9em;color:#666;margin-top:0;'>※必ず <code>&lt;div id='md-content'&gt;&lt;/div&gt;</code> を含めてください（この部分に本文が変換されて表示されます）。</p>";
+            echo "<p style='font-size:0.9em;color:#666;margin-top:0;'>※必ず <code>&lt;div id='md-content'&gt;&lt;/div&gt;</code> を含めてください。条件分岐として <code>{{if_prev}}...{{/if_prev}}</code>、変数は <code>{{prev_url}}</code> <code>{{prev_title}}</code> などが使えます。</p>";
             echo "<textarea name='blog_layout' style='height:250px; font-family:monospace;'>" . htmlspecialchars($savedBlogLayout) . "</textarea>";
             echo "</div>";
 
@@ -1869,6 +1992,7 @@ HTML;
             $pages = array_filter($contents, function($c) { return $c['type'] === 'page'; });
             $blogs = array_filter($contents, function($c) { return $c['type'] === 'blog'; });
             $categories = $this->contentModel->getCategories();
+            $dateField = $settings['blog_date_type'] ?? 'updated_at';
 
             if ($isAdminOrSpecial) {
                 echo "<section><h2 id='pages-title'>サイト構造（通常ページ）</h2>";
@@ -1885,7 +2009,11 @@ HTML;
             }
 
             echo "<section><h2>ブログ記事</h2><a href='{$baseUrl}cms/contents/edit?type=blog' class='btn'>+ ブログを新規作成</a><br><br>";
-            usort($blogs, function($a, $b) { return strtotime($b['updated_at']) < strtotime($a['updated_at']) ? 1 : -1; });
+            usort($blogs, function($a, $b) use ($dateField) { 
+                $aDate = !empty($a[$dateField]) ? $a[$dateField] : ($a['updated_at'] ?? 'now');
+                $bDate = !empty($b[$dateField]) ? $b[$dateField] : ($b['updated_at'] ?? 'now');
+                return strtotime($bDate) <=> strtotime($aDate); 
+            });
             echo "<table><thead><tr><th>タイトル</th><th>カテゴリ</th><th>タグ</th><th>URL</th><th>操作</th></tr></thead><tbody>";
             foreach ($blogs as $b) {
                 $cName = '-';
@@ -1902,6 +2030,9 @@ HTML;
             echo "</tbody></table></section></main></body></html>"; return;
         }
 
+        // ==========================================
+        // ★ 記事編集
+        // ==========================================
         if ($path === 'cms/contents/edit') {
             $id = $_GET['id'] ?? '';
             $requestedType = $_GET['type'] ?? 'blog';
@@ -2069,8 +2200,11 @@ HTML;
             if ($isPage) {
                 echo "<strong style='display:block; margin-bottom:5px; font-size:0.9em; color:#555;'>変数挿入 (クリックで挿入)</strong>";
                 echo "<div style='display:flex; flex-wrap:wrap; gap:5px;'>";
-                echo "<button type='button' class='btn var-btn' data-var='{{blogs limit=5}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>最新ブログ(5件)</button>";
+                echo "<button type='button' class='btn var-btn' data-var='{{blogs limit=5 archive=true}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>最新ブログ＋アーカイブ</button>";
                 echo "<button type='button' class='btn var-btn' data-var='{{blogs limit=10 category=news order=desc}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>ブログ詳細指定</button>";
+                echo "<button type='button' class='btn var-btn' data-var='{{blog_categories}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>カテゴリ一覧</button>";
+                echo "<button type='button' class='btn var-btn' data-var='{{blog_tags}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>タグ一覧</button>";
+                echo "<button type='button' class='btn var-btn' data-var='{{blog_archives}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>月別アーカイブ</button>";
                 echo "<button type='button' class='btn var-btn' data-var='{{blog_search_form}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>ブログ検索窓</button>";
                 if (!empty($settings['site_search_enabled'])) {
                     echo "<button type='button' class='btn var-btn' data-var='{{site_search_form}}' style='padding:4px 8px; font-size:0.85em; background:#17a2b8;'>全体検索窓</button>";
