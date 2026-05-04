@@ -59,7 +59,6 @@ class Router {
         @file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
     }
 
-    // ★ ファイル管理用のJSON読み書き
     private function getUploads() {
         $file = __DIR__ . '/../data/uploads.json';
         return file_exists($file) ? json_decode(file_get_contents($file), true) ?: [] : [];
@@ -495,9 +494,6 @@ HTML;
         $settings = $this->getSettings();
         $dateField = $settings['blog_date_type'] ?? 'updated_at';
 
-        // ==========================================
-        // ルーティング・末尾スラッシュ・Canonical
-        // ==========================================
         $requestUriPath = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
         $hasTrailingSlash = (substr($requestUriPath, -1) === '/');
         $isHome = ($requestUriPath === '/' || rtrim($requestUriPath, '/') === rtrim($baseUrl, '/'));
@@ -549,13 +545,14 @@ HTML;
             }
         }
 
-        // 動的アセット
         if ($path === 'assets/style.css') {
             header('Content-Type: text/css; charset=utf-8');
             echo $this->replaceVariables($this->templateModel->get('style.css'), $baseUrl); return;
         }
 
-        // ★ アップロードファイルの配信処理
+        // ==========================================
+        // メディア (ファイル) の公開アクセス
+        // ==========================================
         if (preg_match('#^uploads/(.+)$#', $cleanPath, $matches)) {
             $filename = basename($matches[1]);
             $filepath = __DIR__ . '/../data/uploads/' . $filename;
@@ -1023,6 +1020,7 @@ HTML;
                     
                     unset($_SESSION['temp_totp_secret']);
                     unset($_SESSION['setup_totp_allowed']);
+                    
                     $_SESSION['flash_backup_codes'] = $bCodes;
                     
                     if (!empty($_SESSION['pending_trust_device'])) {
@@ -1113,12 +1111,17 @@ HTML;
         // ★ メディア・ファイルアップロード管理
         // ==========================================
         if ($path === 'cms/uploads') {
+            $canUpload = ($currentUser['role'] === 'admin' || !empty($settings['upload_allow_general']));
+
             if ($method === 'POST') {
                 $action = $_POST['action'] ?? '';
                 if ($action === 'upload' && isset($_FILES['file'])) {
+                    if (!$canUpload) {
+                        echo json_encode(['success'=>false, 'error'=>"アップロード権限がありません。"]); exit;
+                    }
+                    
                     $file = $_FILES['file'];
                     $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-                    
                     $isAdmin = $currentUser['role'] === 'admin';
                     $bypassRest = $isAdmin && !empty($_POST['bypass_restrictions']);
                     
@@ -1179,34 +1182,80 @@ HTML;
                 }
             }
             
-            // アップロード画面・一覧表示
             $uploads = $this->getUploads();
-            usort($uploads, function($a, $b) { return strtotime($b['created_at']) <=> strtotime($a['created_at']); });
+            
+            // ★ 検索機能
+            $q = trim($_GET['q'] ?? '');
+            if ($q !== '') {
+                $uploads = array_filter($uploads, function($u) use ($q) {
+                    $target = $u['original_name'] . ' ' . $u['filename'] . ' ' . $u['created_at'];
+                    return mb_stripos($target, $q) !== false;
+                });
+            }
+
+            // ★ ソート機能
+            $sort = $_GET['sort'] ?? 'date';
+            $order = $_GET['order'] ?? 'desc';
+            usort($uploads, function($a, $b) use ($sort, $order) {
+                if ($sort === 'name') {
+                    $valA = mb_strtolower($a['original_name']);
+                    $valB = mb_strtolower($b['original_name']);
+                } else {
+                    $valA = strtotime($a['created_at']);
+                    $valB = strtotime($b['created_at']);
+                }
+                if ($valA == $valB) return 0;
+                if ($order === 'asc') return ($valA < $valB) ? -1 : 1;
+                return ($valA > $valB) ? -1 : 1;
+            });
+
+            // ★ ページネーション (1ページ20件)
+            $p = max(1, (int)($_GET['p'] ?? 1));
+            $perPage = 20;
+            $total = count($uploads);
+            $maxPage = max(1, ceil($total / $perPage));
+            if ($p > $maxPage) $p = $maxPage;
+            $pagedUploads = array_slice($uploads, ($p - 1) * $perPage, $perPage);
             
             $webpEnabled = !empty($settings['upload_webp_enable']) ? 'true' : 'false';
             $maxPx = (int)($settings['upload_max_px'] ?? 1200);
+            $webpQuality = ((int)($settings['upload_webp_quality'] ?? 80)) / 100;
 
             echo $adminHead . "<h1>メディア (ファイル) 管理</h1>";
-            echo "<fieldset><legend>ファイルをアップロード</legend>";
-            echo "<p style='font-size:0.9em;color:#666;'>※許可された拡張子: " . htmlspecialchars($settings['upload_allowed_exts'] ?? 'jpg, jpeg, png, gif, webp, pdf, zip, txt') . " / 最大サイズ: " . htmlspecialchars($settings['upload_max_mb'] ?? '5') . " MB</p>";
-            echo "<div style='display:flex;gap:10px;align-items:center; margin-bottom:10px;'>";
-            echo "<input type='file' id='file-upload-input' style='flex:1;'>";
-            echo "<button type='button' id='btn-upload' class='btn'>アップロード実行</button>";
-            echo "</div>";
             
-            if ($currentUser['role'] === 'admin') {
-                echo "<div style='background:#fff3cd; padding:10px; border-radius:4px; font-size:0.9em; margin-bottom:10px;'>";
-                echo "<label><input type='checkbox' id='bypass_restrictions'> 拡張子やサイズの制限を無視する (管理者のみ)</label><br>";
-                echo "<label><input type='checkbox' id='bypass_convert'> 画像のWebP変換・リサイズを行わず元のままアップロードする</label>";
+            if ($canUpload) {
+                echo "<fieldset><legend>ファイルをアップロード</legend>";
+                echo "<p style='font-size:0.9em;color:#666;'>※許可された拡張子: " . htmlspecialchars($settings['upload_allowed_exts'] ?? 'jpg, jpeg, png, gif, webp, pdf, zip, txt') . " / 最大サイズ: " . htmlspecialchars($settings['upload_max_mb'] ?? '5') . " MB</p>";
+                echo "<div style='display:flex;gap:10px;align-items:center; margin-bottom:10px;'>";
+                echo "<input type='file' id='file-upload-input' style='flex:1;'>";
+                echo "<button type='button' id='btn-upload' class='btn'>アップロード実行</button>";
                 echo "</div>";
+                
+                if ($currentUser['role'] === 'admin') {
+                    echo "<div style='background:#fff3cd; padding:10px; border-radius:4px; font-size:0.9em; margin-bottom:10px;'>";
+                    echo "<label><input type='checkbox' id='bypass_restrictions'> 拡張子やサイズの制限を無視する (管理者のみ)</label><br>";
+                    echo "<label><input type='checkbox' id='bypass_convert'> 画像のWebP変換・リサイズを行わず元のままアップロードする</label>";
+                    echo "</div>";
+                }
+                
+                echo "<div id='upload-status' style='display:none; padding:10px; border-radius:4px; margin-top:10px;'></div>";
+                echo "</fieldset>";
+            } else {
+                echo "<div class='alert' style='background:#e9ecef;'>現在は管理者のみアップロードが許可されています。</div>";
             }
-            
-            echo "<div id='upload-status' style='display:none; padding:10px; border-radius:4px; margin-top:10px;'></div>";
-            echo "</fieldset>";
 
             echo "<h2>アップロード済みファイル一覧</h2>";
+            
+            echo "<form method='GET' action='{$baseUrl}cms/uploads' style='display:flex; justify-content:space-between; align-items:center; margin-bottom: 20px; background:#f8f9fa; padding:10px; border-radius:4px; flex-wrap:wrap; gap:10px;'>";
+            echo "<div style='display:flex; align-items:center; gap:5px;'><input type='text' name='q' value='".htmlspecialchars($q)."' placeholder='ファイル名, 拡張子, 日時...' style='padding:8px; width:250px; margin-bottom:0;'> <button type='submit' class='btn' style='padding:8px 15px;'>検索</button>";
+            if ($q) echo " <a href='{$baseUrl}cms/uploads' style='margin-left:5px;'>クリア</a>";
+            echo "</div>";
+            echo "<div style='font-size:0.9em;'>全 {$total} 件中 ".(($p-1)*$perPage+1)." - ".min($total, $p*$perPage)." 件</div>";
+            echo "<div style='display:flex; gap:5px;'><select name='sort' onchange='this.form.submit()' style='margin:0; padding:6px;'><option value='date' ".($sort==='date'?'selected':'').">アップロード日</option><option value='name' ".($sort==='name'?'selected':'').">ファイル名</option></select> ";
+            echo "<select name='order' onchange='this.form.submit()' style='margin:0; padding:6px;'><option value='desc' ".($order==='desc'?'selected':'').">降順</option><option value='asc' ".($order==='asc'?'selected':'').">昇順</option></select></div></form>";
+
             echo "<table><thead><tr><th style='width:100px;'>プレビュー</th><th>ファイル情報</th><th>URL / Markdown</th><th>操作</th></tr></thead><tbody>";
-            foreach ($uploads as $u) {
+            foreach ($pagedUploads as $u) {
                 $ext = strtolower(pathinfo($u['filename'], PATHINFO_EXTENSION));
                 $isImg = in_array($ext, ['jpg','jpeg','png','gif','webp']);
                 $url = "{$baseUrl}uploads/" . $u['filename'];
@@ -1229,11 +1278,21 @@ HTML;
                 echo "</td>";
                 echo "</tr>";
             }
-            if (empty($uploads)) echo "<tr><td colspan='4'>ファイルはありません。</td></tr>";
+            if (empty($pagedUploads)) echo "<tr><td colspan='4'>ファイルはありません。</td></tr>";
             echo "</tbody></table>";
 
-            // JS Upload Logic
-            echo <<<JS
+            if ($maxPage > 1) {
+                echo "<div style='margin-top:20px; display:flex; gap:5px; justify-content:center;'>";
+                for ($i = 1; $i <= $maxPage; $i++) {
+                    $qStr = http_build_query(['q'=>$q, 'sort'=>$sort, 'order'=>$order, 'p'=>$i]);
+                    if ($i === $p) echo "<span style='padding:5px 10px; background:#007bff; color:#fff; border-radius:3px;'>{$i}</span>";
+                    else echo "<a href='{$baseUrl}cms/uploads?{$qStr}' style='padding:5px 10px; background:#e9ecef; text-decoration:none; color:#333; border-radius:3px;'>{$i}</a>";
+                }
+                echo "</div>";
+            }
+
+            if ($canUpload) {
+                echo <<<JS
 <script>
 document.getElementById('btn-upload').addEventListener('click', async () => {
     const fileInput = document.getElementById('file-upload-input');
@@ -1247,6 +1306,7 @@ document.getElementById('btn-upload').addEventListener('click', async () => {
     const isImage = file.type.startsWith('image/');
     const webpEnabled = {$webpEnabled};
     const maxPx = {$maxPx};
+    const webpQuality = {$webpQuality};
     const skipConvert = bypassConv && bypassConv.checked;
     
     statusDiv.style.display = 'block';
@@ -1260,8 +1320,14 @@ document.getElementById('btn-upload').addEventListener('click', async () => {
     if (isImage && webpEnabled && !skipConvert && file.type !== 'image/gif' && file.type !== 'image/svg+xml') {
         statusDiv.textContent = '画像を圧縮・WebPに変換しています...';
         try {
-            uploadFile = await compressImage(file, maxPx);
-            uploadFileName = file.name.replace(/\.[^/.]+$/, "") + ".webp";
+            const convertedBlob = await compressImage(file, maxPx, webpQuality);
+            // ★ 逆効果防止: 圧縮後のファイルサイズが元のサイズより小さければ採用
+            if (convertedBlob.size < file.size) {
+                uploadFile = convertedBlob;
+                uploadFileName = file.name.replace(/\.[^/.]+$/, "") + ".webp";
+            } else {
+                console.log('WebP変換によりファイルサイズが増加したため、元のファイルを使用します。');
+            }
         } catch(e) {
             console.error(e);
             alert('画像の変換に失敗しました。元のままでアップロードします。');
@@ -1277,7 +1343,10 @@ document.getElementById('btn-upload').addEventListener('click', async () => {
 
     try {
         const res = await fetch('{$baseUrl}cms/uploads', { method: 'POST', body: formData });
-        const json = await res.json();
+        const text = await res.text();
+        let json;
+        try { json = JSON.parse(text); } catch(e) { throw new Error('サーバーエラー: ' + text); }
+        
         if (json.success) {
             statusDiv.style.background = '#d4edda';
             statusDiv.style.color = '#155724';
@@ -1293,7 +1362,7 @@ document.getElementById('btn-upload').addEventListener('click', async () => {
     }
 });
 
-function compressImage(file, maxPx) {
+function compressImage(file, maxPx, quality) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = (e) => {
@@ -1312,7 +1381,7 @@ function compressImage(file, maxPx) {
                 ctx.drawImage(img, 0, 0, w, h);
                 canvas.toBlob((blob) => {
                     if(blob) resolve(blob); else reject('Blob creation failed');
-                }, 'image/webp', 0.85);
+                }, 'image/webp', quality);
             };
             img.onerror = () => reject('Image load failed');
             img.src = e.target.result;
@@ -1322,8 +1391,9 @@ function compressImage(file, maxPx) {
     });
 }
 </script>
-</main></body></html>
 JS;
+            }
+            echo "</main></body></html>";
             return;
         }
 
@@ -2136,11 +2206,12 @@ JS;
                     $newSettings['blog_date_type'] = $_POST['blog_date_type'] ?? 'updated_at';
                     $newSettings['allow_user_email_change'] = !empty($_POST['allow_user_email_change']);
                     
-                    // ★ アップロード設定の保存
+                    $newSettings['upload_allow_general'] = !empty($_POST['upload_allow_general']);
                     $newSettings['upload_allowed_exts'] = trim($_POST['upload_allowed_exts'] ?? 'jpg, jpeg, png, gif, webp, pdf, zip, txt');
                     $newSettings['upload_max_mb'] = (float)($_POST['upload_max_mb'] ?? 5);
                     $newSettings['upload_webp_enable'] = !empty($_POST['upload_webp_enable']);
                     $newSettings['upload_max_px'] = (int)($_POST['upload_max_px'] ?? 1200);
+                    $newSettings['upload_webp_quality'] = max(1, min(100, (int)($_POST['upload_webp_quality'] ?? 80)));
                 }
                 
                 $this->saveSettings($newSettings);
@@ -2166,8 +2237,8 @@ JS;
                 echo "<label>最新記事として独立表示する件数: <input type='number' name='blog_latest_count' value='".htmlspecialchars($settings['blog_latest_count'] ?? 5)."' min='1' max='50' style='width:80px; display:inline-block;'></label>";
                 echo "</fieldset>";
 
-                // ★ アップロード・画像設定
                 echo "<fieldset><legend>ファイルアップロード・画像設定 (管理者のみ)</legend>";
+                echo "<label><input type='checkbox' name='upload_allow_general' value='1' ".(!empty($settings['upload_allow_general'])?'checked':'')."> 一般ユーザー(特別部員・一般部員)のファイルアップロードを許可する</label><br><br>";
                 echo "<label>許可する拡張子 (カンマ区切り)</label>";
                 echo "<input type='text' name='upload_allowed_exts' value='".htmlspecialchars($settings['upload_allowed_exts'] ?? 'jpg, jpeg, png, gif, webp, pdf, zip, txt')."'>";
                 echo "<label>最大ファイルサイズ (MB)</label>";
@@ -2175,6 +2246,8 @@ JS;
                 echo "<label><input type='checkbox' name='upload_webp_enable' value='1' ".(!empty($settings['upload_webp_enable'])?'checked':'')."> 画像アップロード時に自動でWebPに変換・圧縮する (クライアントサイド処理)</label><br><br>";
                 echo "<label>画像圧縮時の最大長辺サイズ (px)</label>";
                 echo "<input type='number' name='upload_max_px' value='".htmlspecialchars($settings['upload_max_px'] ?? 1200)."' min='100' max='4000'>";
+                echo "<label>WebP変換時の品質 (1〜100、推奨: 80)</label>";
+                echo "<input type='number' name='upload_webp_quality' value='".htmlspecialchars($settings['upload_webp_quality'] ?? 80)."' min='1' max='100'>";
                 echo "</fieldset>";
 
                 echo "<fieldset><legend>システム保存設定 (管理者のみ)</legend>";
@@ -2312,9 +2385,6 @@ HTML;
             return;
         }
 
-        // ==========================================
-        // 記事・ページ管理 (一覧・削除・編集)
-        // ==========================================
         if ($path === 'cms/contents/delete' && $method === 'POST') {
             if (!$isAdminOrSpecial) $this->renderErrorPage(403, $baseUrl, "権限がありません。", $adminHead);
             $id = $_POST['id'] ?? '';
@@ -2549,7 +2619,6 @@ HTML;
 
             echo "<fieldset style='display:flex; flex-direction:column;'><legend>本文</legend>";
             
-            // ★ ファイルアップロード画面へのリンク追加
             echo "<div style='text-align:right; margin-bottom:10px;'>";
             echo "<a href='{$baseUrl}cms/uploads' target='_blank' class='btn' style='background:#6f42c1; font-size:0.9em;'>📷 ファイル管理を開く (別タブ)</a>";
             echo "</div>";
