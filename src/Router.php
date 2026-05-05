@@ -152,7 +152,7 @@ class Router {
             $sort = $_GET['sort'] ?? ($q !== '' ? 'score' : 'date');
             $order = $_GET['order'] ?? 'desc';
 
-            $allBlogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
+            $allBlogs = array_filter($q !== '' ? $this->contentModel->getAllFull() : $this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
             $filteredBlogs = [];
             foreach ($allBlogs as $b) {
                 $bDate = !empty($b[$dateField]) ? $b[$dateField] : ($b['updated_at'] ?? 'now');
@@ -163,7 +163,7 @@ class Router {
                 $b['score'] = 0;
                 if ($q !== '') {
                     $searchStrTitle = mb_strtolower($b['title']);
-                    $searchStrBody = mb_strtolower($b['body']);
+                    $searchStrBody = mb_strtolower($b['body'] ?? '');
                     $qLower = mb_strtolower($q);
                     
                     $countTitle = mb_substr_count($searchStrTitle, $qLower);
@@ -623,11 +623,12 @@ HTML;
             
             $results = [];
             if ($q !== '') {
-                $allContents = $this->contentModel->getAll();
+                // 検索時はフルデータを取得する
+                $allContents = $this->contentModel->getAllFull();
                 foreach ($allContents as $c) {
                     $c['score'] = 0;
                     $searchStrTitle = mb_strtolower($c['title']);
-                    $searchStrBody = mb_strtolower($c['body']);
+                    $searchStrBody = mb_strtolower($c['body'] ?? '');
                     $qLower = mb_strtolower($q);
                     
                     $countTitle = mb_substr_count($searchStrTitle, $qLower);
@@ -2673,7 +2674,8 @@ HTML;
             $order = $_GET['order'] ?? 'desc';
             $p = max(1, (int)($_GET['p'] ?? 1));
 
-            $blogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
+            // 検索キーワードがある場合のみ、本文も含まれるフルデータを取得する
+            $blogs = array_filter($q !== '' ? $this->contentModel->getAllFull() : $this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
             $categories = $this->contentModel->getCategories();
             
             $users = $this->userModel->getAll();
@@ -2683,7 +2685,7 @@ HTML;
             if ($q !== '') {
                 $blogs = array_filter($blogs, function($b) use ($q, $userMap) {
                     $authorName = $userMap[$b['author_id'] ?? ''] ?? '不明';
-                    $target = $b['title'] . ' ' . $b['body'] . ' ' . $authorName;
+                    $target = $b['title'] . ' ' . ($b['body'] ?? '') . ' ' . $authorName;
                     return mb_stripos($target, $q) !== false;
                 });
             }
