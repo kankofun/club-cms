@@ -463,10 +463,13 @@ class Router {
 </style></head><body>
 <aside class="sidebar" aria-label="管理メニュー"><h2>CMS Menu</h2><nav><ul>
     <li><a href="{$baseUrl}dashboard">ダッシュボード</a></li>
-    <li><a href="{$baseUrl}cms/pages">通常ページ管理</a></li>
-    <li><a href="{$baseUrl}cms/blogs_admin">ブログ記事管理</a></li>
-    <li><a href="{$baseUrl}cms/uploads">メディア(ファイル)管理</a></li>
 HTML;
+        if ($isAdminOrSpecial) {
+            $head .= "<li><a href='{$baseUrl}cms/pages'>通常ページ管理</a></li>";
+        }
+        $head .= "<li><a href='{$baseUrl}cms/blogs_admin'>ブログ記事管理</a></li>";
+        $head .= "<li><a href='{$baseUrl}cms/uploads'>メディア(ファイル)管理</a></li>";
+        
         if ($isAdminOrSpecial) {
             $head .= "<li><a href='{$baseUrl}cms/categories'>カテゴリ管理</a></li>";
             $head .= "<li><a href='{$baseUrl}cms/templates'>システム設定・デザイン</a></li>";
@@ -485,6 +488,19 @@ HTML;
     <li><a href="{$baseUrl}logout">ログアウト</a></li>
 </ul></nav></aside><main class="main-content">
 HTML;
+        
+        // ★ フラッシュメッセージの展開表示
+        $flashMsg = $_SESSION['flash_message'] ?? '';
+        $flashErr = $_SESSION['flash_error'] ?? '';
+        unset($_SESSION['flash_message'], $_SESSION['flash_error']);
+        
+        if ($flashMsg) {
+            $head .= "<div class='alert' style='background:#d4edda; color:#155724; border:1px solid #c3e6cb;'>" . htmlspecialchars($flashMsg) . "</div>";
+        }
+        if ($flashErr) {
+            $head .= "<div class='alert alert-error' style='background:#f8d7da; color:#721c24; border:1px solid #f5c6cb;'>" . htmlspecialchars($flashErr) . "</div>";
+        }
+        
         return $head;
     }
 
@@ -551,9 +567,6 @@ HTML;
             echo $this->replaceVariables($this->templateModel->get('style.css'), $baseUrl); return;
         }
 
-        // ==========================================
-        // メディア (ファイル) の公開アクセス
-        // ==========================================
         if (preg_match('#^uploads/(.+)$#', $cleanPath, $matches)) {
             $filename = basename($matches[1]);
             $filepath = __DIR__ . '/../data/uploads/' . $filename;
@@ -573,9 +586,6 @@ HTML;
             $this->renderErrorPage(404, $baseUrl, "ファイルが見つかりません。");
         }
 
-        // ==========================================
-        // 公開エリア（フロントエンド）
-        // ==========================================
         if ($cleanPath === 'index' || $isHome) {
             $indexPage = $this->contentModel->getBySlug('index', 'page');
             if ($indexPage) {
@@ -827,7 +837,7 @@ HTML;
         }
 
         // ==========================================
-        // 3. ログイン・二段階認証 (2FA) 処理
+        // ログイン・認証プロセス
         // ==========================================
         if ($path === 'login') {
             if ($this->auth->isLoggedIn()) { 
@@ -1098,6 +1108,13 @@ HTML;
         
         $currentUser = $this->auth->getCurrentUser();
         $isAdminOrSpecial = $isSystemPath ? in_array($currentUser['role'], ['admin', 'special']) : false;
+        
+        // ★ 通常ページ管理へのアクセス権限チェック
+        if ($path === 'cms/pages' && !$isAdminOrSpecial) {
+            $_SESSION['flash_error'] = "権限がありません。";
+            header("Location: {$baseUrl}dashboard"); exit;
+        }
+
         $adminHead = $isSystemPath ? $this->getAdminHead($baseUrl, $currentUser, $isAdminOrSpecial) : '';
 
         if ($path === 'dashboard') {
@@ -1109,7 +1126,7 @@ HTML;
         }
 
         // ==========================================
-        // ★ メディア・ファイルアップロード管理
+        // メディア・ファイルアップロード管理
         // ==========================================
         if ($path === 'cms/uploads') {
             $canUpload = ($currentUser['role'] === 'admin' || !empty($settings['upload_allow_general']));
@@ -1126,7 +1143,6 @@ HTML;
                     $isAdmin = $currentUser['role'] === 'admin';
                     $bypassRest = $isAdmin && !empty($_POST['bypass_restrictions']);
                     
-                    // ★ 悪意のあるファイルの実行を防ぐための強制保護
                     $dangerousExts = ['php', 'php3', 'php4', 'php5', 'phtml', 'exe', 'sh', 'cgi', 'pl', 'py'];
                     if (in_array($ext, $dangerousExts)) {
                         echo json_encode(['success'=>false, 'error'=>"セキュリティ上の理由により、この拡張子のファイルはアップロードできません。"]); exit;
@@ -1136,7 +1152,6 @@ HTML;
                     $maxMb = (float)($settings['upload_max_mb'] ?? 5);
                     $maxBytes = $maxMb * 1024 * 1024;
 
-                    // ★ PHP側での拡張子・サイズの最終確認
                     if (!$bypassRest) {
                         if (!in_array($ext, $allowedExts)) {
                             echo json_encode(['success'=>false, 'error'=>"許可されていない拡張子です: {$ext}"]); exit;
@@ -1180,7 +1195,10 @@ HTML;
                             if ($currentUser['role'] === 'admin' || $u['user_id'] === $currentUser['id']) {
                                 @unlink(__DIR__ . '/../data/uploads/' . $u['filename']);
                                 $this->writeLog($currentUser, 'File Delete', "File: {$u['filename']}");
+                                $_SESSION['flash_message'] = "ファイルを削除しました。";
                                 continue;
+                            } else {
+                                $_SESSION['flash_error'] = "他のユーザーのファイルは削除できません。";
                             }
                         }
                         $newUploads[] = $u;
@@ -1192,7 +1210,6 @@ HTML;
             
             $uploads = $this->getUploads();
             
-            // ★ 検索機能
             $q = trim($_GET['q'] ?? '');
             if ($q !== '') {
                 $uploads = array_filter($uploads, function($u) use ($q) {
@@ -1201,7 +1218,6 @@ HTML;
                 });
             }
 
-            // ★ ソート機能
             $sort = $_GET['sort'] ?? 'date';
             $order = $_GET['order'] ?? 'desc';
             usort($uploads, function($a, $b) use ($sort, $order) {
@@ -1217,7 +1233,6 @@ HTML;
                 return ($valA > $valB) ? -1 : 1;
             });
 
-            // ★ ページネーション (1ページ20件)
             $p = max(1, (int)($_GET['p'] ?? 1));
             $perPage = 20;
             $total = count($uploads);
@@ -1322,7 +1337,6 @@ document.getElementById('btn-upload').addEventListener('click', async () => {
     const isBypass = bypassRest && bypassRest.checked;
     const skipConvert = bypassConv && bypassConv.checked;
 
-    // ★ クライアントサイドでの事前バリデーション
     if (!isBypass) {
         const allowedExts = "{$allowedExtsStr}".split(',').map(e => e.trim().toLowerCase());
         const ext = file.name.split('.').pop().toLowerCase();
@@ -1422,7 +1436,7 @@ JS;
         }
 
         // ==========================================
-        // 管理機能（各種設定、マイTOTP設定など）
+        // 各種設定 (メール)
         // ==========================================
         if ($path === 'cms/settings/mail' && $currentUser['role'] === 'admin') {
             $msg = ''; $err = '';
@@ -1430,10 +1444,11 @@ JS;
                 if (isset($_POST['action']) && $_POST['action'] === 'test_mail') {
                     $mailer = new Mailer($settings);
                     if ($mailer->send($_POST['test_email'], "CMS テストメール", "これはCMSからのテスト送信です。\nこのメールが届いていれば設定は正常です。")) {
-                        $msg = "テストメールを送信しました。";
+                        $_SESSION['flash_message'] = "テストメールを送信しました。";
                     } else {
-                        $err = "送信に失敗しました。設定を見直してください。";
+                        $_SESSION['flash_error'] = "送信に失敗しました。設定を見直してください。";
                     }
+                    header("Location: {$baseUrl}cms/settings/mail"); exit;
                 } else {
                     $settings['mail_method'] = $_POST['mail_method'] ?? 'sendmail';
                     $settings['smtp_host'] = $_POST['smtp_host'] ?? '';
@@ -1444,16 +1459,14 @@ JS;
                     $settings['mail_from'] = $_POST['mail_from'] ?? '';
                     $settings['mail_from_name'] = $_POST['mail_from_name'] ?? '';
                     $this->saveSettings($settings);
-                    $msg = "メール設定を保存しました。";
+                    $_SESSION['flash_message'] = "メール設定を保存しました。";
+                    header("Location: {$baseUrl}cms/settings/mail"); exit;
                 }
             }
 
             echo $adminHead . "<h1>メール送信設定</h1>";
-            if ($msg) echo "<div class='alert'>$msg</div>";
-            if ($err) echo "<div class='alert alert-error'>$err</div>";
-
             echo "<p>この画面では、ログインシステムがメールを送信する際の設定を行います。<br>sendmail（PHP mail）または SMTP のどちらかを選択できます。</p>";
-            echo "<form method='POST'><fieldset><legend>■ メール送信方式</legend>";
+            echo "<form id='edit-form' method='POST'><fieldset><legend>■ メール送信方式</legend>";
             echo "<label><input type='radio' name='mail_method' value='sendmail' ".(($settings['mail_method']??'sendmail')==='sendmail'?'checked':'')."> sendmail (PHP mail)</label><br>";
             echo "<label><input type='radio' name='mail_method' value='smtp' ".(($settings['mail_method']??'')==='smtp'?'checked':'')."> SMTP</label><br><br>";
             echo "<label>送信元メールアドレス (From): <input type='email' name='mail_from' value='".htmlspecialchars($settings['mail_from']??'')."'></label>";
@@ -1472,14 +1485,17 @@ JS;
             echo "<input type='hidden' name='action' value='test_mail'>";
             echo "<label>テストメール送信先アドレス: <input type='email' name='test_email' required></label>";
             echo "<button type='submit' class='btn' style='background:#6c757d;'>テストメールを送信する</button></form>";
+            echo "<script>let isDirty = false; document.getElementById('edit-form').addEventListener('input', () => isDirty = true); window.addEventListener('beforeunload', (e) => { if(isDirty){ e.preventDefault(); e.returnValue = ''; } }); document.getElementById('edit-form').addEventListener('submit', () => isDirty = false);</script>";
             echo "</main></body></html>";
             return;
         }
 
+        // ==========================================
+        // 2FA全体設定・ユーザー別管理 (管理者)
+        // ==========================================
         if ($path === 'cms/settings/2fa' && $currentUser['role'] === 'admin') {
-            $msg = ''; $err = '';
-
             if ($method === 'POST') {
+                $err = '';
                 if (isset($_POST['action']) && $_POST['action'] === 'save_global') {
                     if ($_POST['2fa_mode'] !== 'none') {
                         $users = $this->userModel->getAll();
@@ -1493,14 +1509,16 @@ JS;
                         $settings['2fa_mode'] = $_POST['2fa_mode'];
                         $settings['2fa_trust_days'] = (int)($_POST['2fa_trust_days'] ?? 0);
                         $this->saveSettings($settings);
-                        $msg = "二段階認証の設定を保存しました。";
+                        $_SESSION['flash_message'] = "二段階認証の設定を保存しました。";
+                    } else {
+                        $_SESSION['flash_error'] = $err;
                     }
                 } elseif (isset($_POST['action']) && $_POST['action'] === 'disable_user') {
                     $u = $this->userModel->findById($_POST['target_user']);
                     if ($u) {
                         $u['is_2fa_enabled'] = false; $u['totp_secret'] = null; $u['backup_codes'] = [];
                         $this->userModel->save($u);
-                        $msg = "{$u['name']} のTOTPを無効化しました。";
+                        $_SESSION['flash_message'] = "{$u['name']} のTOTPを無効化しました。";
                     }
                 } elseif (isset($_POST['action']) && $_POST['action'] === 'notify_user') {
                     $u = $this->userModel->findById($_POST['target_user']);
@@ -1508,19 +1526,18 @@ JS;
                         $mailer = new Mailer($settings);
                         $body = "{$u['name']} 様\n\n管理者より二段階認証（TOTP）の設定が許可されました。\n以下のURLからログインし、「マイTOTP設定」より設定を完了してください。\n\n{$baseUrl}login";
                         if ($mailer->send($u['email'], "二段階認証の設定について", $body)) {
-                            $msg = "{$u['name']} に設定案内メールを送信しました。";
+                            $_SESSION['flash_message'] = "{$u['name']} に設定案内メールを送信しました。";
                         } else {
-                            $err = "メールの送信に失敗しました。設定を確認してください。";
+                            $_SESSION['flash_error'] = "メールの送信に失敗しました。設定を確認してください。";
                         }
                     }
                 }
+                header("Location: {$baseUrl}cms/settings/2fa"); exit;
             }
 
             echo $adminHead . "<h1>二段階認証（2FA）システム設定</h1>";
-            if ($msg) echo "<div class='alert'>$msg</div>";
-            if ($err) echo "<div class='alert alert-error'>$err</div>";
 
-            echo "<form method='POST'><input type='hidden' name='action' value='save_global'><fieldset><legend>■ 二段階認証方式</legend>";
+            echo "<form id='edit-form' method='POST'><input type='hidden' name='action' value='save_global'><fieldset><legend>■ 二段階認証方式</legend>";
             $mode = $settings['2fa_mode'] ?? 'none';
             echo "<label><input type='radio' name='2fa_mode' value='none' ".($mode==='none'?'checked':'')."> 2FA無し（メールもTOTPも無効）</label><br>";
             echo "<label><input type='radio' name='2fa_mode' value='email' ".($mode==='email'?'checked':'')."> メール認証のみ（必須）</label><br>";
@@ -1561,7 +1578,9 @@ JS;
                 }
                 echo "</td></tr>";
             }
-            echo "</tbody></table></main></body></html>";
+            echo "</tbody></table>";
+            echo "<script>let isDirty = false; document.getElementById('edit-form').addEventListener('input', () => isDirty = true); window.addEventListener('beforeunload', (e) => { if(isDirty){ e.preventDefault(); e.returnValue = ''; } }); document.getElementById('edit-form').addEventListener('submit', () => isDirty = false);</script>";
+            echo "</main></body></html>";
             return;
         }
 
@@ -1576,7 +1595,6 @@ JS;
             $account = urlencode($targetUser['student_id']);
             $qrUrl = "otpauth://totp/{$issuer}:{$account}?secret={$secret}&issuer={$issuer}";
 
-            $err = '';
             if ($method === 'POST') {
                 if (TOTP::verify($secret, preg_replace('/[^0-9]/', '', $_POST['code'] ?? ''))) {
                     $targetUser['totp_secret'] = $secret;
@@ -1591,18 +1609,19 @@ JS;
                     $this->userModel->save($targetUser);
                     unset($_SESSION['temp_admin_totp_secret']);
                     $_SESSION['flash_backup_codes'] = $bCodes;
+                    $_SESSION['flash_message'] = "TOTPを設定しました。";
                     header("Location: {$baseUrl}cms/settings/2fa/backup?id={$targetUser['id']}"); exit;
                 } else {
-                    $err = "コードが正しくありません。";
+                    $_SESSION['flash_error'] = "コードが正しくありません。";
+                    header("Location: {$baseUrl}cms/settings/2fa/manage?id={$id}"); exit;
                 }
             }
 
             echo $adminHead . "<h1>TOTP 対面セットアップ: {$targetUser['name']}</h1>";
-            if ($err) echo "<div class='alert alert-error'>$err</div>";
             echo "<p>対象者のスマートフォンで以下のQRコードを読み取り、表示されたコードを入力してください。</p>";
             echo "<div id='qrcode' style='margin:20px 0;'></div>";
             echo "<p>手動入力キー: <strong>{$secret}</strong></p>";
-            echo "<form method='POST'><label>認証コード: <input type='text' name='code' required></label><button type='submit' class='btn'>設定を完了する</button></form>";
+            echo "<form method='POST'><label>認証コード: <input type='text' name='code' required autocomplete='off'></label><button type='submit' class='btn'>設定を完了する</button></form>";
             echo "<script src='https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js'></script>";
             echo "<script>new QRCode(document.getElementById('qrcode'), '{$qrUrl}');</script>";
             echo "</main></body></html>";
@@ -1620,12 +1639,16 @@ JS;
             return;
         }
 
+        // ==========================================
+        // マイTOTP設定 (一般ユーザー自身による操作)
+        // ==========================================
         if (strpos($path, 'cms/2fa') === 0) {
             $user = $this->userModel->findById($currentUser['id']);
             $mode = $settings['2fa_mode'] ?? 'none';
 
             if ($mode === 'none' || $mode === 'email') {
-                echo $adminHead . "<h1>二段階認証</h1><p>現在、ユーザーによるTOTP設定は無効化されています。</p></main></body></html>"; return;
+                $_SESSION['flash_error'] = "現在、ユーザーによるTOTP設定は無効化されています。";
+                header("Location: {$baseUrl}dashboard"); exit;
             }
 
             if ($path === 'cms/2fa') {
@@ -1657,6 +1680,7 @@ JS;
                 if ($method === 'POST' && $mode !== 'email_totp_required') {
                     $user['is_2fa_enabled'] = false; $user['totp_secret'] = null; $user['backup_codes'] = [];
                     $this->userModel->save($user);
+                    $_SESSION['flash_message'] = "TOTPを無効化しました。";
                 }
                 header("Location: {$baseUrl}cms/2fa"); exit;
             }
@@ -1675,23 +1699,22 @@ JS;
             }
 
             if ($path === 'cms/2fa/verify') {
-                $err = '';
                 if ($method === 'POST') {
                     if (time() > $user['email_verify_expires']) {
-                        $err = "コードの有効期限が切れています。もう一度最初からやり直してください。";
+                        $_SESSION['flash_error'] = "コードの有効期限が切れています。もう一度最初からやり直してください。";
                     } elseif (password_verify($_POST['code'] ?? '', $user['email_verify_code'])) {
                         $_SESSION['2fa_email_verified'] = true;
                         $user['email_verify_code'] = null; $user['email_verify_expires'] = null;
                         $this->userModel->save($user);
                         header("Location: {$baseUrl}cms/2fa/setup"); exit;
                     } else {
-                        $err = "確認コードが正しくありません。";
+                        $_SESSION['flash_error'] = "確認コードが正しくありません。";
                     }
+                    header("Location: {$baseUrl}cms/2fa/verify"); exit;
                 }
                 echo $adminHead . "<h1>メール認証</h1>";
-                if ($err) echo "<div class='alert alert-error'>$err</div>";
                 echo "<p>登録メールアドレスに確認コード（6桁）を送信しました。</p>";
-                echo "<form method='POST'><label>確認コード（6桁）: <input type='text' name='code' required></label><button type='submit' class='btn'>認証して次へ</button></form></main></body></html>";
+                echo "<form method='POST'><label>確認コード（6桁）: <input type='text' name='code' required autocomplete='off'></label><button type='submit' class='btn'>認証して次へ</button></form></main></body></html>";
                 return;
             }
 
@@ -1720,7 +1743,6 @@ JS;
                 $account = urlencode($user['student_id']);
                 $qrUrl = "otpauth://totp/{$issuer}:{$account}?secret={$secret}&issuer={$issuer}";
 
-                $err = '';
                 if ($method === 'POST') {
                     if (TOTP::verify($secret, preg_replace('/[^0-9]/', '', $_POST['code'] ?? ''))) {
                         $user['totp_secret'] = $secret;
@@ -1738,17 +1760,17 @@ JS;
                         $_SESSION['flash_backup_codes'] = $bCodes;
                         header("Location: {$baseUrl}cms/2fa/backup"); exit;
                     } else {
-                        $err = "認証コードが正しくありません。";
+                        $_SESSION['flash_error'] = "認証コードが正しくありません。";
+                        header("Location: {$baseUrl}cms/2fa/setup"); exit;
                     }
                 }
 
                 echo $adminHead . "<h1>二段階認証（TOTP）セットアップ</h1>";
-                if ($err) echo "<div class='alert alert-error'>$err</div>";
                 echo "<ol><li>認証アプリ（Google Authenticator等）を準備してください</li>";
                 echo "<li>以下のQRコードを読み取ってください<br><div id='qrcode' style='margin:15px 0;'></div></li>";
                 echo "<li>手動入力キー（必要な場合）: <strong>{$secret}</strong></li></ol>";
                 echo "<h3>認証コードの確認</h3><p>アプリに表示された6桁のコードを入力してください。</p>";
-                echo "<form method='POST'><label>認証コード: <input type='text' name='code' required></label><button type='submit' class='btn'>設定を完了する</button></form>";
+                echo "<form method='POST'><label>認証コード: <input type='text' name='code' required autocomplete='off'></label><button type='submit' class='btn'>設定を完了する</button></form>";
                 echo "<script src='https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js'></script>";
                 echo "<script>new QRCode(document.getElementById('qrcode'), '{$qrUrl}');</script></main></body></html>";
                 return;
@@ -1838,7 +1860,8 @@ JS;
                         $zip->extractTo(DATA_DIR);
                         $zip->close();
                         $this->writeLog($currentUser, 'Full Import', 'Restored all data from ZIP');
-                        header("Location: {$baseUrl}cms/backups?msg=imported");
+                        $_SESSION['flash_message'] = "全データのインポートが完了しました。";
+                        header("Location: {$baseUrl}cms/backups");
                         exit;
                     }
                 }
@@ -1848,7 +1871,6 @@ JS;
 
         if ($path === 'cms/backups' && $currentUser['role'] === 'admin') {
             echo $adminHead . "<h1>復元と入出力</h1>";
-            if (isset($_GET['msg']) && $_GET['msg'] === 'imported') echo "<div class='alert' role='alert'>全データのインポートが完了しました。システムが更新されました。</div>";
             $backupDir = __DIR__ . '/../data/backups';
             if ($method === 'POST' && !empty($_POST['restore_file']) && !empty($_POST['original_file'])) {
                 $restorePath = $backupDir . '/' . $_POST['restore_file'];
@@ -1861,7 +1883,8 @@ JS;
                     }
                     copy($restorePath, $originalPath);
                     $this->writeLog($currentUser, 'Restore Backup', "Restored {$_POST['original_file']} from {$_POST['restore_file']}");
-                    echo "<div class='alert' role='alert'>ファイルの復元が完了しました。</div>";
+                    $_SESSION['flash_message'] = "ファイルの復元が完了しました。";
+                    header("Location: {$baseUrl}cms/backups"); exit;
                 }
             }
 
@@ -1927,14 +1950,14 @@ JS;
             $order = $_GET['order'] ?? 'asc';
             $p = max(1, (int)($_GET['p'] ?? 1));
             
-            $batchMessage = '';
             if ($method === 'POST' && !empty($_POST['batch_action']) && !empty($_POST['user_ids'])) {
                 $action = $_POST['batch_action'];
+                $skipMsg = [];
                 foreach ($_POST['user_ids'] as $targetId) {
                     if ($targetId === $currentUser['id']) {
-                        if ($action === 'delete') { $batchMessage = "※ログイン中の自分自身は削除から除外されました。"; continue; }
-                        if ($action === 'lock') { $batchMessage = "※ログイン中の自分自身は一時停止できません。"; continue; }
-                        if (in_array($action, ['special', 'general'])) { $batchMessage = "※自分自身の権限を降格させることはできません。"; continue; }
+                        if ($action === 'delete') { $skipMsg[] = "ログイン中の自分自身は削除から除外されました。"; continue; }
+                        if ($action === 'lock') { $skipMsg[] = "ログイン中の自分自身は一時停止できません。"; continue; }
+                        if (in_array($action, ['special', 'general'])) { $skipMsg[] = "自分自身の権限を降格させることはできません。"; continue; }
                     }
                     if ($action === 'delete') $this->userModel->delete($targetId);
                     elseif (in_array($action, ['admin', 'special', 'general'])) { $u = $this->userModel->findById($targetId); if ($u) { $u['role'] = $action; $this->userModel->save($u); } }
@@ -1942,11 +1965,15 @@ JS;
                     elseif ($action === 'unlock') { $u = $this->userModel->findById($targetId); if ($u) { $u['is_locked'] = false; $this->userModel->save($u); } }
                 }
                 $this->writeLog($currentUser, 'Batch Action', "Action: {$action}");
-                if (empty($batchMessage)) { header("Location: {$baseUrl}cms/users"); exit; }
+                if (!empty($skipMsg)) {
+                    $_SESSION['flash_error'] = implode("<br>", $skipMsg);
+                } else {
+                    $_SESSION['flash_message'] = "一括処理を完了しました。";
+                }
+                header("Location: {$baseUrl}cms/users"); exit;
             }
             
             echo $adminHead . "<h1>ユーザー管理</h1>";
-            if ($batchMessage) echo "<div class='alert alert-error'>$batchMessage</div>";
 
             echo "<form method='GET' style='margin-bottom:20px; background:#f8f9fa; padding:15px; border-radius:4px; border:1px solid #dee2e6; display:flex; flex-wrap:wrap; gap:10px; align-items:center;'>";
             echo "<div><label for='search'>ユーザー検索:</label> <input type='text' id='search' name='search' value='".htmlspecialchars($search)."' style='width:200px; margin-bottom:0;'></div>";
@@ -1973,7 +2000,6 @@ JS;
             $users = $this->userModel->getAll();
             if ($search) $users = array_filter($users, function($u) use ($search) { return (stripos($u['student_id'] ?? '', $search) !== false) || (stripos($u['name'] ?? '', $search) !== false); });
             
-            // ★ 並べ替え用の基準値を計算して保持
             foreach ($users as $index => &$u) {
                 $u['_index'] = $index;
                 $u['_grade'] = !empty($u['grade']) ? $u['grade'] : $this->userModel->calculateGrade($u['student_id']);
@@ -2035,11 +2061,16 @@ JS;
         if ($path === 'cms/users/edit' && $currentUser['role'] === 'admin') {
             $id = $_GET['id'] ?? '';
             $formData = ['id' => '', 'student_id' => '', 'name' => '', 'email' => '', 'grade' => '', 'role' => 'general'];
-            $error = '';
             
-            if ($id && $method !== 'POST') {
-                $existingData = $this->userModel->findById($id);
-                if ($existingData) $formData = array_merge($formData, $existingData);
+            if ($method !== 'POST') {
+                if (isset($_SESSION['recovery_post'])) {
+                    $formData = array_merge($formData, $_SESSION['recovery_post']);
+                    unset($_SESSION['recovery_post']);
+                    $_SESSION['flash_error'] = "セッションが切れたため、入力内容を復元しました。";
+                } elseif ($id) {
+                    $existingData = $this->userModel->findById($id);
+                    if ($existingData) $formData = array_merge($formData, $existingData);
+                }
             }
 
             if ($method === 'POST') {
@@ -2047,14 +2078,20 @@ JS;
                 $student_id = trim($formData['student_id'] ?? '');
 
                 if (empty($student_id)) {
-                    $error = '学籍番号/IDは必須です。';
+                    $_SESSION['flash_error'] = '学籍番号/IDは必須です。';
+                    $_SESSION['recovery_post'] = $_POST;
+                    header("Location: {$baseUrl}cms/users/edit" . ($id ? "?id={$id}" : "")); exit;
                 } else {
                     $existingUser = $this->userModel->findByStudentId($student_id);
                     if ($existingUser && $existingUser['id'] !== $id) {
-                        $error = 'この学籍番号/IDは既に登録されています。';
+                        $_SESSION['flash_error'] = 'この学籍番号/IDは既に登録されています。';
+                        $_SESSION['recovery_post'] = $_POST;
+                        header("Location: {$baseUrl}cms/users/edit" . ($id ? "?id={$id}" : "")); exit;
                     } else {
                         if ($id === $currentUser['id'] && $formData['role'] !== 'admin') {
-                            $error = '自分自身の権限を降格させることはできません。';
+                            $_SESSION['flash_error'] = '自分自身の権限を降格させることはできません。';
+                            $_SESSION['recovery_post'] = $_POST;
+                            header("Location: {$baseUrl}cms/users/edit?id={$id}"); exit;
                         } else {
                             if (!empty($_POST['password'])) {
                                 $formData['password_hash'] = password_hash($_POST['password'], PASSWORD_DEFAULT);
@@ -2063,9 +2100,12 @@ JS;
 
                             if ($this->userModel->save($formData)) {
                                 $this->writeLog($currentUser, 'User Saved', "User ID: {$student_id}");
+                                $_SESSION['flash_message'] = "ユーザーを保存しました。";
                                 header("Location: {$baseUrl}cms/users"); exit;
                             } else {
-                                $error = '保存に失敗しました。';
+                                $_SESSION['flash_error'] = '保存に失敗しました。';
+                                $_SESSION['recovery_post'] = $_POST;
+                                header("Location: {$baseUrl}cms/users/edit" . ($id ? "?id={$id}" : "")); exit;
                             }
                         }
                     }
@@ -2073,8 +2113,7 @@ JS;
             }
 
             echo $adminHead . "<h1>ユーザー" . ($id ? "編集" : "登録") . "</h1>";
-            if ($error) echo "<div class='alert alert-error'>$error</div>";
-            echo "<form method='POST'>";
+            echo "<form id='edit-form' method='POST'>";
             if ($id) echo "<input type='hidden' name='id' value='".htmlspecialchars($formData['id'])."'>";
             
             echo "<fieldset><legend>ユーザー情報</legend>";
@@ -2090,7 +2129,9 @@ JS;
             echo "<label>パスワード " . ($id ? "(変更する場合のみ入力)" : "<span style='color:red;'>*</span>") . "</label>";
             echo "<input type='password' name='password' " . ($id ? "" : "required") . ">";
             echo "</fieldset>";
-            echo "<button type='submit' class='btn'>保存する</button> <a href='{$baseUrl}cms/users' class='btn' style='background:#6c757d;'>キャンセル</a></form></main></body></html>";
+            echo "<button type='submit' class='btn'>保存する</button> <a href='{$baseUrl}cms/users' class='btn' style='background:#6c757d;'>キャンセル</a></form>";
+            echo "<script>let isDirty = false; document.getElementById('edit-form').addEventListener('input', () => isDirty = true); window.addEventListener('beforeunload', (e) => { if(isDirty){ e.preventDefault(); e.returnValue = ''; } }); document.getElementById('edit-form').addEventListener('submit', () => isDirty = false);</script>";
+            echo "</main></body></html>";
             return;
         }
 
@@ -2183,13 +2224,13 @@ JS;
                 }
                 unset($_SESSION['csv_import_data']);
                 $this->writeLog($currentUser, 'CSV Import', "{$importedCount} users imported/updated");
-                echo $adminHead . "<h1>インポート完了</h1><p>{$importedCount} 件のユーザーを処理しました。</p><a href='{$baseUrl}cms/users' class='btn'>ユーザー一覧に戻る</a></main></body></html>";
-                return;
+                $_SESSION['flash_message'] = "{$importedCount} 件のユーザーを処理しました。";
+                header("Location: {$baseUrl}cms/users"); exit;
             }
 
             echo $adminHead . "<h1>CSV列の割り当て</h1>";
             echo "<p>読み込んだCSVデータのどの列を、システムのどの項目に割り当てるか指定してください。</p>";
-            echo "<form method='POST'><fieldset>";
+            echo "<form id='edit-form' method='POST'><fieldset>";
             echo "<label><input type='checkbox' name='has_header' value='1' checked> 1行目はヘッダーとして無視する</label><br><br>";
             
             echo "<div style='background:#fff3cd; padding:15px; border-radius:4px; margin-bottom:20px; border:1px solid #ffeeba;'>";
@@ -2228,7 +2269,9 @@ JS;
                 echo "</select></label><br><br>";
             }
 
-            echo "<button type='submit' class='btn'>インポートを実行</button> <a href='{$baseUrl}cms/users' class='btn' style='background:#6c757d;'>キャンセル</a></fieldset></form></main></body></html>";
+            echo "<button type='submit' class='btn'>インポートを実行</button> <a href='{$baseUrl}cms/users' class='btn' style='background:#6c757d;'>キャンセル</a></fieldset></form>";
+            echo "<script>let isDirty = false; document.getElementById('edit-form').addEventListener('input', () => isDirty = true); window.addEventListener('beforeunload', (e) => { if(isDirty){ e.preventDefault(); e.returnValue = ''; } }); document.getElementById('edit-form').addEventListener('submit', () => isDirty = false);</script>";
+            echo "</main></body></html>";
             return;
         }
 
@@ -2239,12 +2282,14 @@ JS;
             if ($method === 'POST') {
                 if (isset($_POST['delete_id'])) {
                     $this->contentModel->deleteCategory($_POST['delete_id']);
+                    $_SESSION['flash_message'] = "カテゴリを削除しました。";
                 } else {
                     $this->contentModel->saveCategory([
                         'id' => $_POST['id']??'', 
                         'name' => trim($_POST['name']??''),
                         'color' => $_POST['color'] ?? '#007bff'
                     ]);
+                    $_SESSION['flash_message'] = "カテゴリを保存しました。";
                 }
                 header("Location: {$baseUrl}cms/categories"); exit;
             }
@@ -2271,7 +2316,6 @@ JS;
         // システム設定・テンプレート
         // ==========================================
         if ($path === 'cms/templates' && $isAdminOrSpecial) {
-            $message = '';
             if ($method === 'POST') {
                 $this->templateModel->save('header.html', $_POST['header']);
                 $this->templateModel->save('footer.html', $_POST['footer']);
@@ -2308,13 +2352,12 @@ JS;
                 
                 $this->saveSettings($newSettings);
                 $this->writeLog($currentUser, 'Settings Saved', 'テンプレート・設定を更新しました');
-                $message = "設定を保存しました。";
-                $settings = $this->getSettings();
+                $_SESSION['flash_message'] = "設定を保存しました。";
+                header("Location: {$baseUrl}cms/templates"); exit;
             }
             
             echo $adminHead . "<h1>システム設定・テンプレート管理</h1>";
-            if ($message) echo "<div class='alert' role='alert'>$message</div>";
-            echo "<form method='POST'>";
+            echo "<form id='edit-form' method='POST'>";
             
             if ($currentUser['role'] === 'admin') {
                 echo "<fieldset><legend>ブログ・全体機能拡張 (管理者のみ)</legend>";
@@ -2409,7 +2452,9 @@ HTML;
             echo "<textarea name='blog_layout' style='height:250px; font-family:monospace;'>" . htmlspecialchars($savedBlogLayout) . "</textarea>";
             echo "</div>";
 
-            echo "</fieldset><button type='submit' class='btn'>保存する</button></form></main></body></html>";
+            echo "</fieldset><button type='submit' class='btn'>保存する</button></form>";
+            echo "<script>let isDirty = false; document.getElementById('edit-form').addEventListener('input', () => isDirty = true); window.addEventListener('beforeunload', (e) => { if(isDirty){ e.preventDefault(); e.returnValue = ''; } }); document.getElementById('edit-form').addEventListener('submit', () => isDirty = false);</script>";
+            echo "</main></body></html>";
             return;
         }
 
@@ -2417,7 +2462,6 @@ HTML;
         // プロフィール設定
         // ==========================================
         if ($path === 'cms/profile') {
-            $message = ''; $error = '';
             $allowEmailChange = !empty($settings['allow_user_email_change']);
             $userProfile = $this->userModel->findById($currentUser['id']);
 
@@ -2433,11 +2477,11 @@ HTML;
                 $_SESSION = $backupSession;
 
                 if (!$isCurrentPassValid) {
-                    $error = "現在のパスワードが間違っています。";
+                    $_SESSION['flash_error'] = "現在のパスワードが間違っています。";
                 } elseif ($newPass !== '' && $newPass !== $newPassConf) {
-                    $error = "新しいパスワードと確認用パスワードが一致しません。";
+                    $_SESSION['flash_error'] = "新しいパスワードと確認用パスワードが一致しません。";
                 } elseif ($newPass !== '' && strlen($newPass) < 4) {
-                    $error = "パスワードは短すぎます（4文字以上推奨）。";
+                    $_SESSION['flash_error'] = "パスワードは短すぎます（4文字以上推奨）。";
                 } else {
                     if ($newPass !== '') {
                         $this->userModel->changePassword($currentUser['id'], $newPass);
@@ -2448,15 +2492,14 @@ HTML;
                     }
                     
                     $this->writeLog($currentUser, 'Profile Updated', 'プロフィールを変更しました');
-                    $message = "プロフィールを安全に変更しました。";
+                    $_SESSION['flash_message'] = "プロフィールを安全に変更しました。";
                 }
+                header("Location: {$baseUrl}cms/profile"); exit;
             }
             
             echo $adminHead . "<h1>プロフィール設定</h1>";
-            if ($message) echo "<div class='alert' role='alert'>$message</div>";
-            if ($error) echo "<div class='alert alert-error' role='alert'>$error</div>";
             
-            echo "<form method='POST'><fieldset><legend>ユーザー情報の変更</legend>";
+            echo "<form id='edit-form' method='POST'><fieldset><legend>ユーザー情報の変更</legend>";
             
             if ($allowEmailChange) {
                 echo "<label for='email'>メールアドレス</label><input type='email' id='email' name='email' value='".htmlspecialchars($userProfile['email'] ?? '')."'>";
@@ -2473,33 +2516,40 @@ HTML;
             
             echo "<label for='current_password'>現在のパスワード <span style='color:red;'>*</span> <span style='color:#666; font-size:0.9em;'>(保存の確認に必要です)</span></label><input type='password' id='current_password' name='current_password' required>";
             
-            echo "<button type='submit' class='btn'>保存する</button></fieldset></form></main></body></html>";
+            echo "<button type='submit' class='btn'>保存する</button></fieldset></form>";
+            echo "<script>let isDirty = false; document.getElementById('edit-form').addEventListener('input', () => isDirty = true); window.addEventListener('beforeunload', (e) => { if(isDirty){ e.preventDefault(); e.returnValue = ''; } }); document.getElementById('edit-form').addEventListener('submit', () => isDirty = false);</script>";
+            echo "</main></body></html>";
             return;
         }
 
-        // ==========================================
-        // 記事・ページ管理 (一覧・削除・編集)
-        // ==========================================
         if ($path === 'cms/contents/delete' && $method === 'POST') {
-            if (!$isAdminOrSpecial) $this->renderErrorPage(403, $baseUrl, "権限がありません。", $adminHead);
             $id = $_POST['id'] ?? '';
             if ($id) {
                 $content = $this->contentModel->getById($id);
                 if ($content) {
-                    $this->contentModel->delete($id);
-                    $this->writeLog($currentUser, 'Content Deleted', "Title: {$content['title']}");
+                    if (!$isAdminOrSpecial && $content['author_id'] !== $currentUser['id']) {
+                        $_SESSION['flash_error'] = "他のユーザーが作成した記事は削除できません。";
+                    } else {
+                        $this->contentModel->delete($id);
+                        $this->writeLog($currentUser, 'Content Deleted', "Title: {$content['title']}");
+                        $_SESSION['flash_message'] = "記事を削除しました。";
+                    }
                 }
             }
             if (!empty($_POST['return_to'])) {
                 header("Location: {$baseUrl}" . $_POST['return_to']);
             } else {
-                header("Location: {$baseUrl}cms/contents");
+                header("Location: {$baseUrl}cms/blogs_admin");
             }
             exit;
         }
 
-        // ★ 通常ページ管理 (エクスプローラー型)
-        if ($path === 'cms/pages' && $isAdminOrSpecial) {
+        if ($path === 'cms/pages') {
+            if (!$isAdminOrSpecial) {
+                $_SESSION['flash_error'] = "通常ページ管理の権限がありません。";
+                header("Location: {$baseUrl}dashboard"); exit;
+            }
+
             echo $adminHead . "<h1>通常ページ管理</h1>";
             echo "<p style='font-size:0.9em;color:#666;margin-top:-10px;'>※スラッグを <code>404</code> や <code>403</code> などのステータスコードにすると、システムのエラーページとして自動的に使われます。</p>";
 
@@ -2557,7 +2607,6 @@ HTML;
 
             echo "<div style='display:flex; gap:20px; background:#fff; border:1px solid #dee2e6; border-radius:4px;'>";
             
-            // ツリービュー
             echo "<div style='width:250px; background:#f8f9fa; padding:15px; border-right:1px solid #dee2e6; min-height:400px;'>";
             echo "<strong style='display:block; margin-bottom:10px; color:#495057;'>📂 フォルダツリー</strong>";
             echo "<ul style='list-style:none; padding:0; margin:0;'>";
@@ -2571,10 +2620,8 @@ HTML;
             }
             echo "</ul></div>";
 
-            // メインエリア
             echo "<div style='flex:1; padding:15px; display:flex; flex-direction:column;'>";
             
-            // パンくず・アクションバー
             echo "<div style='display:flex; justify-content:space-between; align-items:center; background:#e9ecef; padding:10px; border-radius:4px; margin-bottom:15px;'>";
             echo "<div style='font-size:1.1em;'>";
             foreach ($breadcrumbs as $i => $bc) {
@@ -2590,7 +2637,6 @@ HTML;
             echo "<div><a href='{$baseUrl}cms/contents/edit?type=page&slug_prefix=" . urlencode($newSlugPrefix) . "' class='btn' style='padding:5px 10px; font-size:0.9em;'>+ この階層にページ作成</a></div>";
             echo "</div>";
 
-            // リストビュー
             echo "<table style='margin-bottom:0;'><thead><tr><th style='width:50px;'></th><th>名前 (スラッグ)</th><th>タイトル</th><th>操作</th></tr></thead><tbody>";
             if ($currentDir !== '') {
                 $upDir = strpos($currentDir, '/') !== false ? substr($currentDir, 0, strrpos($currentDir, '/')) : '';
@@ -2619,7 +2665,6 @@ HTML;
             return;
         }
 
-        // ★ ブログ管理 (別画面化)
         if ($path === 'cms/blogs_admin') {
             echo $adminHead . "<h1>ブログ記事管理</h1>";
             
@@ -2694,8 +2739,11 @@ HTML;
                 echo "<td>" . htmlspecialchars($authorName) . "</td>";
                 echo "<td style='font-size:0.9em;'>作: {$cDate}<br>更: {$uDate}</td>";
                 echo "<td style='font-size:0.9em;'>カ: ".htmlspecialchars($cName)."<br>タ: ".htmlspecialchars($tags)."</td>";
+                
                 echo "<td><a href='{$baseUrl}cms/contents/edit?id=".urlencode($b['id'])."' class='btn' style='padding:5px 10px; font-size:0.9em; margin-right:5px;'>編集</a>";
-                if ($isAdminOrSpecial) echo "<form action='{$baseUrl}cms/contents/delete' method='POST' style='display:inline;' onsubmit='return confirm(\"本当に削除しますか？\")'><input type='hidden' name='id' value='".htmlspecialchars($b['id'])."'><input type='hidden' name='return_to' value='cms/blogs_admin'><button type='submit' class='btn' style='background:#dc3545; padding:5px 10px; font-size:0.9em;'>削除</button></form>";
+                if ($isAdminOrSpecial || $b['author_id'] === $currentUser['id']) {
+                    echo "<form action='{$baseUrl}cms/contents/delete' method='POST' style='display:inline;' onsubmit='return confirm(\"本当に削除しますか？\")'><input type='hidden' name='id' value='".htmlspecialchars($b['id'])."'><input type='hidden' name='return_to' value='cms/blogs_admin'><button type='submit' class='btn' style='background:#dc3545; padding:5px 10px; font-size:0.9em;'>削除</button></form>";
+                }
                 echo "</td></tr>";
             }
             if (empty($pagedBlogs)) echo "<tr><td colspan='5'>記事が見つかりません。</td></tr>";
@@ -2719,7 +2767,7 @@ HTML;
         if ($path === 'cms/contents/edit') {
             $id = $_GET['id'] ?? '';
             $requestedType = $_GET['type'] ?? 'blog';
-            $slugPrefix = $_GET['slug_prefix'] ?? ''; // 通常ページ新規作成時の初期ディレクトリ
+            $slugPrefix = $_GET['slug_prefix'] ?? ''; 
             $formData = [
                 'id' => '', 'title' => '', 'slug' => $slugPrefix, 'type' => $requestedType, 'body' => '', 
                 'meta_description' => '', 'version' => 1, 'author_id' => $currentUser['id'], 
@@ -2731,11 +2779,24 @@ HTML;
                 if (isset($_SESSION['recovery_post'])) {
                     $formData = array_merge($formData, $_SESSION['recovery_post']);
                     unset($_SESSION['recovery_post']);
-                    $error = "セッションがタイムアウトしたため再ログインしました。編集中だったデータを復元しました（まだ保存されていません）。";
+                    $_SESSION['flash_error'] = "セッションが切れたか、エラーが発生したため入力内容を復元しました。";
                 } elseif ($id) {
                     $existingData = $this->contentModel->getById($id);
                     if ($existingData) {
+                        if (!$isAdminOrSpecial && $existingData['author_id'] !== $currentUser['id']) {
+                            $_SESSION['flash_error'] = "他のユーザーの記事は編集できません。";
+                            header("Location: {$baseUrl}cms/blogs_admin"); exit;
+                        }
                         $formData = array_merge($formData, $existingData);
+                    } else {
+                        $_SESSION['flash_error'] = "記事が見つかりません。";
+                        header("Location: {$baseUrl}cms/blogs_admin"); exit;
+                    }
+                } else {
+                    // 新規の通常ページ作成時に権限チェック
+                    if ($requestedType === 'page' && !$isAdminOrSpecial) {
+                        $_SESSION['flash_error'] = "通常ページの作成権限がありません。";
+                        header("Location: {$baseUrl}dashboard"); exit;
                     }
                 }
             }
@@ -2746,6 +2807,11 @@ HTML;
                 $formData['version'] = $_POST['base_version'] ?? 1;
                 $formData['author_id'] = $currentUser['id'];
                 $isPage = ($formData['type'] === 'page');
+
+                if ($isPage && !$isAdminOrSpecial) {
+                    $_SESSION['flash_error'] = "通常ページの編集権限がありません。";
+                    header("Location: {$baseUrl}dashboard"); exit;
+                }
 
                 if ($formData['type'] === 'blog' && empty($formData['slug'])) $formData['slug'] = date('YmdHis');
                 
@@ -2763,7 +2829,9 @@ HTML;
                 $firstDir = strtolower($slugParts[0]);
 
                 if ($isPage && in_array($firstDir, $forbidden)) {
-                    $error = 'エラー: システムの予約名やディレクトリ（' . htmlspecialchars($firstDir) . '）はURLとして使用できません。別の名前を指定してください。';
+                    $_SESSION['flash_error'] = 'エラー: システムの予約名やディレクトリ（' . htmlspecialchars($firstDir) . '）はURLとして使用できません。';
+                    $_SESSION['recovery_post'] = $_POST;
+                    header("Location: {$baseUrl}cms/contents/edit" . ($id ? "?id={$id}" : "?type={$requestedType}")); exit;
                 } else {
                     $slugDuplicate = false;
                     $allContents = $this->contentModel->getAll();
@@ -2775,12 +2843,14 @@ HTML;
                     }
 
                     if ($slugDuplicate) {
-                        $error = 'エラー: 指定したURL階層/スラッグは既に使用されています。別の文字列を指定してください。';
+                        $_SESSION['flash_error'] = 'エラー: 指定したURL階層/スラッグは既に使用されています。';
+                        $_SESSION['recovery_post'] = $_POST;
+                        header("Location: {$baseUrl}cms/contents/edit" . ($id ? "?id={$id}" : "?type={$requestedType}")); exit;
                     } else {
                         $result = $this->contentModel->save($formData, (int)$_POST['base_version']);
                         if ($result['success']) { 
                             $this->writeLog($currentUser, 'Content Saved', "Title: {$formData['title']}");
-                            // ★ 保存後のリダイレクト先を種類に応じて変更
+                            $_SESSION['flash_message'] = "保存しました。";
                             if ($isPage) header("Location: {$baseUrl}cms/pages"); 
                             else header("Location: {$baseUrl}cms/blogs_admin"); 
                             exit; 
@@ -2822,7 +2892,9 @@ HTML;
                                 echo "</div></main></body></html>";
                                 return;
                             } else {
-                                $error = '保存に失敗しました。';
+                                $_SESSION['flash_error'] = '保存に失敗しました。';
+                                $_SESSION['recovery_post'] = $_POST;
+                                header("Location: {$baseUrl}cms/contents/edit" . ($id ? "?id={$id}" : "?type={$requestedType}")); exit;
                             }
                         }
                     }
@@ -2830,8 +2902,7 @@ HTML;
             }
 
             echo $adminHead . "<h1>" . ($isPage ? '通常ページ' : 'ブログ記事') . "の編集</h1>";
-            if ($error) echo "<div class='alert alert-error'>$error</div>";
-            echo "<form method='POST'>";
+            echo "<form id='edit-form' method='POST'>";
             echo "<input type='hidden' name='id' value='".htmlspecialchars($formData['id'])."'>";
             echo "<input type='hidden' name='base_version' value='".htmlspecialchars($formData['version'] ?? 1)."'>";
             echo "<input type='hidden' name='type' value='".htmlspecialchars($formData['type'])."'>";
@@ -2956,7 +3027,24 @@ document.addEventListener('DOMContentLoaded', () => {
     const preview = document.getElementById('preview-area');
     const previewContainer = document.getElementById('preview-container');
     const toggle = document.getElementById('toggle-preview');
+    const editForm = document.getElementById('edit-form');
     
+    // ★ 離脱防止（スライディングセーフティ）
+    let isDirty = false;
+    editor.addEventListener('input', () => isDirty = true);
+    document.querySelectorAll('input, select').forEach(el => {
+        el.addEventListener('input', () => isDirty = true);
+        el.addEventListener('change', () => isDirty = true);
+    });
+    
+    window.addEventListener('beforeunload', (e) => {
+        if(isDirty){ e.preventDefault(); e.returnValue = ''; }
+    });
+    
+    editForm.addEventListener('submit', () => {
+        isDirty = false; // 保存時はアラートを出さない
+    });
+
     if (preview && toggle) {
         const updatePreview = () => {
             if (!toggle.checked) return;
@@ -2997,6 +3085,7 @@ document.addEventListener('DOMContentLoaded', () => {
         editor.selectionEnd = editor.selectionStart;
         editor.focus();
         
+        isDirty = true;
         if (preview && toggle && toggle.checked) {
             editor.dispatchEvent(new Event('input'));
         }
