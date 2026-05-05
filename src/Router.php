@@ -463,7 +463,8 @@ class Router {
 </style></head><body>
 <aside class="sidebar" aria-label="管理メニュー"><h2>CMS Menu</h2><nav><ul>
     <li><a href="{$baseUrl}dashboard">ダッシュボード</a></li>
-    <li><a href="{$baseUrl}cms/contents">記事・ページ管理</a></li>
+    <li><a href="{$baseUrl}cms/pages">通常ページ管理</a></li>
+    <li><a href="{$baseUrl}cms/blogs_admin">ブログ記事管理</a></li>
     <li><a href="{$baseUrl}cms/uploads">メディア(ファイル)管理</a></li>
 HTML;
         if ($isAdminOrSpecial) {
@@ -494,9 +495,6 @@ HTML;
         $settings = $this->getSettings();
         $dateField = $settings['blog_date_type'] ?? 'updated_at';
 
-        // ==========================================
-        // ルーティング・末尾スラッシュ・Canonical
-        // ==========================================
         $requestUriPath = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
         $hasTrailingSlash = (substr($requestUriPath, -1) === '/');
         $isHome = ($requestUriPath === '/' || rtrim($requestUriPath, '/') === rtrim($baseUrl, '/'));
@@ -1128,10 +1126,17 @@ HTML;
                     $isAdmin = $currentUser['role'] === 'admin';
                     $bypassRest = $isAdmin && !empty($_POST['bypass_restrictions']);
                     
+                    // ★ 悪意のあるファイルの実行を防ぐための強制保護
+                    $dangerousExts = ['php', 'php3', 'php4', 'php5', 'phtml', 'exe', 'sh', 'cgi', 'pl', 'py'];
+                    if (in_array($ext, $dangerousExts)) {
+                        echo json_encode(['success'=>false, 'error'=>"セキュリティ上の理由により、この拡張子のファイルはアップロードできません。"]); exit;
+                    }
+
                     $allowedExts = array_map('trim', explode(',', $settings['upload_allowed_exts'] ?? 'jpg,jpeg,png,gif,webp,pdf,zip,txt'));
                     $maxMb = (float)($settings['upload_max_mb'] ?? 5);
                     $maxBytes = $maxMb * 1024 * 1024;
 
+                    // ★ PHP側での拡張子・サイズの最終確認
                     if (!$bypassRest) {
                         if (!in_array($ext, $allowedExts)) {
                             echo json_encode(['success'=>false, 'error'=>"許可されていない拡張子です: {$ext}"]); exit;
@@ -1187,6 +1192,7 @@ HTML;
             
             $uploads = $this->getUploads();
             
+            // ★ 検索機能
             $q = trim($_GET['q'] ?? '');
             if ($q !== '') {
                 $uploads = array_filter($uploads, function($u) use ($q) {
@@ -1195,6 +1201,7 @@ HTML;
                 });
             }
 
+            // ★ ソート機能
             $sort = $_GET['sort'] ?? 'date';
             $order = $_GET['order'] ?? 'desc';
             usort($uploads, function($a, $b) use ($sort, $order) {
@@ -1210,6 +1217,7 @@ HTML;
                 return ($valA > $valB) ? -1 : 1;
             });
 
+            // ★ ページネーション (1ページ20件)
             $p = max(1, (int)($_GET['p'] ?? 1));
             $perPage = 20;
             $total = count($uploads);
@@ -1911,11 +1919,11 @@ JS;
         }
 
         // ==========================================
-        // ★ ユーザー管理 (ページネーションとソート機能追加)
+        // ★ ユーザー管理 (ページネーション、全項目ソート、登録順)
         // ==========================================
         if ($path === 'cms/users' && $currentUser['role'] === 'admin') {
             $search = $_GET['search'] ?? '';
-            $sort = $_GET['sort'] ?? 'student_id';
+            $sort = $_GET['sort'] ?? 'registered';
             $order = $_GET['order'] ?? 'asc';
             $p = max(1, (int)($_GET['p'] ?? 1));
             
@@ -1943,6 +1951,7 @@ JS;
             echo "<form method='GET' style='margin-bottom:20px; background:#f8f9fa; padding:15px; border-radius:4px; border:1px solid #dee2e6; display:flex; flex-wrap:wrap; gap:10px; align-items:center;'>";
             echo "<div><label for='search'>ユーザー検索:</label> <input type='text' id='search' name='search' value='".htmlspecialchars($search)."' style='width:200px; margin-bottom:0;'></div>";
             echo "<div><label>並べ替え: <select name='sort' style='margin-bottom:0; width:auto;'>";
+            echo "<option value='registered' ".($sort==='registered'?'selected':'').">登録順</option>";
             echo "<option value='student_id' ".($sort==='student_id'?'selected':'').">学籍番号/ID</option>";
             echo "<option value='name' ".($sort==='name'?'selected':'').">名前</option>";
             echo "<option value='grade' ".($sort==='grade'?'selected':'').">学年</option>";
@@ -1964,7 +1973,9 @@ JS;
             $users = $this->userModel->getAll();
             if ($search) $users = array_filter($users, function($u) use ($search) { return (stripos($u['student_id'] ?? '', $search) !== false) || (stripos($u['name'] ?? '', $search) !== false); });
             
-            foreach ($users as &$u) {
+            // ★ 並べ替え用の基準値を計算して保持
+            foreach ($users as $index => &$u) {
+                $u['_index'] = $index;
                 $u['_grade'] = !empty($u['grade']) ? $u['grade'] : $this->userModel->calculateGrade($u['student_id']);
                 $u['_status'] = !empty($u['is_locked']) ? 1 : 0;
             }
@@ -1980,6 +1991,8 @@ JS;
                     $valA = $roles[$a['role']] ?? 99; $valB = $roles[$b['role']] ?? 99;
                 }
                 elseif ($sort === 'status') { $valA = $a['_status']; $valB = $b['_status']; }
+                elseif ($sort === 'registered') { $valA = $a['_index']; $valB = $b['_index']; }
+                else { $valA = $a['_index']; $valB = $b['_index']; }
                 
                 if ($valA == $valB) return 0;
                 if ($order === 'asc') return ($valA < $valB) ? -1 : 1;
@@ -2464,6 +2477,9 @@ HTML;
             return;
         }
 
+        // ==========================================
+        // 記事・ページ管理 (一覧・削除・編集)
+        // ==========================================
         if ($path === 'cms/contents/delete' && $method === 'POST') {
             if (!$isAdminOrSpecial) $this->renderErrorPage(403, $baseUrl, "権限がありません。", $adminHead);
             $id = $_POST['id'] ?? '';
@@ -2474,52 +2490,227 @@ HTML;
                     $this->writeLog($currentUser, 'Content Deleted', "Title: {$content['title']}");
                 }
             }
-            header("Location: {$baseUrl}cms/contents"); exit;
+            if (!empty($_POST['return_to'])) {
+                header("Location: {$baseUrl}" . $_POST['return_to']);
+            } else {
+                header("Location: {$baseUrl}cms/contents");
+            }
+            exit;
         }
 
-        if ($path === 'cms/contents') {
-            echo $adminHead . "<h1>記事・ページ管理</h1>";
-            $contents = $this->contentModel->getAll();
-            $pages = array_filter($contents, function($c) { return $c['type'] === 'page'; });
-            $blogs = array_filter($contents, function($c) { return $c['type'] === 'blog'; });
-            $categories = $this->contentModel->getCategories();
-            $dateField = $settings['blog_date_type'] ?? 'updated_at';
+        // ★ 通常ページ管理 (エクスプローラー型)
+        if ($path === 'cms/pages' && $isAdminOrSpecial) {
+            echo $adminHead . "<h1>通常ページ管理</h1>";
+            echo "<p style='font-size:0.9em;color:#666;margin-top:-10px;'>※スラッグを <code>404</code> や <code>403</code> などのステータスコードにすると、システムのエラーページとして自動的に使われます。</p>";
 
-            if ($isAdminOrSpecial) {
-                echo "<section><h2 id='pages-title'>サイト構造（通常ページ）</h2>";
-                echo "<p style='font-size:0.9em;color:#666;margin-top:-10px;'>※スラッグを <code>404</code> や <code>403</code> などのステータスコードにすると、システムのエラーページとして自動的に使われます。</p>";
-                echo "<a href='{$baseUrl}cms/contents/edit?type=page' class='btn'>+ 通常ページを新規作成</a><br><br>";
-                usort($pages, function($a, $b) { return strcmp($a['slug'] ?? '', $b['slug'] ?? ''); });
-                echo "<table><thead><tr><th>ページ階層 (URL)</th><th>タイトル</th><th>操作</th></tr></thead><tbody>";
-                foreach ($pages as $p) {
-                    $slug = $p['slug'] ?? '';
-                    $indent = str_repeat("<span class='tree-indent'>└</span>", substr_count($slug, '/'));
-                    echo "<tr><td>{$indent}/" . htmlspecialchars($slug) . "</td><td>" . htmlspecialchars($p['title']) . "</td>";
-                    echo "<td><a href='{$baseUrl}cms/contents/edit?id=".urlencode($p['id'])."'>編集</a> <form action='{$baseUrl}cms/contents/delete' method='POST' style='display:inline;' onsubmit='return confirm(\"本当に削除しますか？\")'><input type='hidden' name='id' value='".htmlspecialchars($p['id'])."'><button type='submit' class='btn' style='background:#dc3545; padding:5px 10px; font-size:0.9em;'>削除</button></form></td></tr>";
+            $currentDir = rtrim($_GET['dir'] ?? '', '/');
+            $pages = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'page'; });
+
+            $dirs = ['' => true];
+            foreach ($pages as $p) {
+                $slug = trim($p['slug'] ?? '', '/');
+                if ($slug === '') continue;
+                $parts = explode('/', $slug);
+                array_pop($parts);
+                $d = '';
+                foreach ($parts as $part) {
+                    $d .= ($d === '' ? '' : '/') . $part;
+                    $dirs[$d] = true;
                 }
-                echo "</tbody></table></section><hr>";
+            }
+            $dirKeys = array_keys($dirs);
+            sort($dirKeys);
+
+            $breadcrumbs = [];
+            $breadcrumbs[] = ['name' => 'ルート ( / )', 'path' => ''];
+            if ($currentDir !== '') {
+                $parts = explode('/', $currentDir);
+                $d = '';
+                foreach ($parts as $part) {
+                    $d .= ($d === '' ? '' : '/') . $part;
+                    $breadcrumbs[] = ['name' => $part, 'path' => $d];
+                }
             }
 
-            echo "<section><h2>ブログ記事</h2><a href='{$baseUrl}cms/contents/edit?type=blog' class='btn'>+ ブログを新規作成</a><br><br>";
-            usort($blogs, function($a, $b) use ($dateField) { 
-                $aDate = !empty($a[$dateField]) ? $a[$dateField] : ($a['updated_at'] ?? 'now');
-                $bDate = !empty($b[$dateField]) ? $b[$dateField] : ($b['updated_at'] ?? 'now');
-                return strtotime($bDate) <=> strtotime($aDate); 
+            $items = [];
+            foreach ($dirKeys as $d) {
+                if ($d === '' || $d === $currentDir) continue;
+                $parentDir = strpos($d, '/') !== false ? substr($d, 0, strrpos($d, '/')) : '';
+                if ($parentDir === $currentDir) {
+                    $items[] = ['is_dir' => true, 'name' => basename($d), 'path' => $d];
+                }
+            }
+            foreach ($pages as $p) {
+                $slug = trim($p['slug'] ?? '', '/');
+                $parentDir = strpos($slug, '/') !== false ? substr($slug, 0, strrpos($slug, '/')) : '';
+                if ($slug === 'index' && $currentDir === '') $parentDir = '';
+                if ($parentDir === $currentDir) {
+                    $items[] = ['is_dir' => false, 'id' => $p['id'], 'name' => basename($slug), 'title' => $p['title'], 'slug' => $slug];
+                }
+            }
+
+            usort($items, function($a, $b) {
+                if ($a['is_dir'] && !$b['is_dir']) return -1;
+                if (!$a['is_dir'] && $b['is_dir']) return 1;
+                return strcasecmp($a['name'], $b['name']);
             });
-            echo "<table><thead><tr><th>タイトル</th><th>カテゴリ</th><th>タグ</th><th>URL</th><th>操作</th></tr></thead><tbody>";
-            foreach ($blogs as $b) {
+
+            echo "<div style='display:flex; gap:20px; background:#fff; border:1px solid #dee2e6; border-radius:4px;'>";
+            
+            // ツリービュー
+            echo "<div style='width:250px; background:#f8f9fa; padding:15px; border-right:1px solid #dee2e6; min-height:400px;'>";
+            echo "<strong style='display:block; margin-bottom:10px; color:#495057;'>📂 フォルダツリー</strong>";
+            echo "<ul style='list-style:none; padding:0; margin:0;'>";
+            $rootBold = $currentDir === '' ? 'font-weight:bold;' : '';
+            echo "<li style='margin-bottom:5px;'><a href='{$baseUrl}cms/pages?dir=' style='text-decoration:none; color:#0056b3; {$rootBold}'>📁 ルート</a></li>";
+            foreach ($dirKeys as $d) {
+                if ($d === '') continue;
+                $indent = substr_count($d, '/') * 15 + 15;
+                $isCurrent = $d === $currentDir ? 'font-weight:bold; color:#000;' : 'color:#0056b3;';
+                echo "<li style='margin-bottom:5px; padding-left:{$indent}px;'><a href='{$baseUrl}cms/pages?dir={$d}' style='text-decoration:none; {$isCurrent}'>📁 " . basename($d) . "</a></li>";
+            }
+            echo "</ul></div>";
+
+            // メインエリア
+            echo "<div style='flex:1; padding:15px; display:flex; flex-direction:column;'>";
+            
+            // パンくず・アクションバー
+            echo "<div style='display:flex; justify-content:space-between; align-items:center; background:#e9ecef; padding:10px; border-radius:4px; margin-bottom:15px;'>";
+            echo "<div style='font-size:1.1em;'>";
+            foreach ($breadcrumbs as $i => $bc) {
+                if ($i > 0) echo " <span style='color:#6c757d;'>/</span> ";
+                if ($i === count($breadcrumbs) - 1) {
+                    echo "<strong>" . htmlspecialchars($bc['name']) . "</strong>";
+                } else {
+                    echo "<a href='{$baseUrl}cms/pages?dir={$bc['path']}' style='text-decoration:none; color:#0056b3;'>" . htmlspecialchars($bc['name']) . "</a>";
+                }
+            }
+            echo "</div>";
+            $newSlugPrefix = $currentDir !== '' ? $currentDir . '/' : '';
+            echo "<div><a href='{$baseUrl}cms/contents/edit?type=page&slug_prefix=" . urlencode($newSlugPrefix) . "' class='btn' style='padding:5px 10px; font-size:0.9em;'>+ この階層にページ作成</a></div>";
+            echo "</div>";
+
+            // リストビュー
+            echo "<table style='margin-bottom:0;'><thead><tr><th style='width:50px;'></th><th>名前 (スラッグ)</th><th>タイトル</th><th>操作</th></tr></thead><tbody>";
+            if ($currentDir !== '') {
+                $upDir = strpos($currentDir, '/') !== false ? substr($currentDir, 0, strrpos($currentDir, '/')) : '';
+                echo "<tr><td style='text-align:center;'>📁</td><td><a href='{$baseUrl}cms/pages?dir={$upDir}' style='text-decoration:none; color:#0056b3;'>.. (上の階層へ)</a></td><td></td><td></td></tr>";
+            }
+            foreach ($items as $item) {
+                echo "<tr>";
+                if ($item['is_dir']) {
+                    echo "<td style='text-align:center; font-size:1.2em;'>📁</td>";
+                    echo "<td><a href='{$baseUrl}cms/pages?dir={$item['path']}' style='text-decoration:none; color:#0056b3; font-weight:bold;'>" . htmlspecialchars($item['name']) . "</a></td>";
+                    echo "<td style='color:#6c757d;'>- (フォルダ) -</td><td></td>";
+                } else {
+                    echo "<td style='text-align:center; font-size:1.2em; color:#6c757d;'>📄</td>";
+                    echo "<td>" . htmlspecialchars($item['name']) . "</td>";
+                    echo "<td>" . htmlspecialchars($item['title']) . "</td>";
+                    echo "<td><a href='{$baseUrl}cms/contents/edit?id=".urlencode($item['id'])."' class='btn' style='padding:4px 8px; font-size:0.85em; margin-right:5px;'>編集</a>";
+                    echo "<form action='{$baseUrl}cms/contents/delete' method='POST' style='display:inline;' onsubmit='return confirm(\"本当に削除しますか？\")'><input type='hidden' name='id' value='".htmlspecialchars($item['id'])."'><input type='hidden' name='return_to' value='cms/pages?dir={$currentDir}'><button type='submit' class='btn' style='background:#dc3545; padding:4px 8px; font-size:0.85em;'>削除</button></form></td>";
+                }
+                echo "</tr>";
+            }
+            if (empty($items)) {
+                echo "<tr><td colspan='4' style='text-align:center; color:#6c757d;'>このフォルダは空です</td></tr>";
+            }
+            echo "</tbody></table>";
+            echo "</div></div></main></body></html>";
+            return;
+        }
+
+        // ★ ブログ管理 (別画面化)
+        if ($path === 'cms/blogs_admin') {
+            echo $adminHead . "<h1>ブログ記事管理</h1>";
+            
+            $q = trim($_GET['q'] ?? '');
+            $sort = $_GET['sort'] ?? 'updated_at';
+            $order = $_GET['order'] ?? 'desc';
+            $p = max(1, (int)($_GET['p'] ?? 1));
+
+            $blogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
+            $categories = $this->contentModel->getCategories();
+            
+            $users = $this->userModel->getAll();
+            $userMap = [];
+            foreach ($users as $u) $userMap[$u['id']] = $u['name'];
+
+            if ($q !== '') {
+                $blogs = array_filter($blogs, function($b) use ($q, $userMap) {
+                    $authorName = $userMap[$b['author_id'] ?? ''] ?? '不明';
+                    $target = $b['title'] . ' ' . $b['body'] . ' ' . $authorName;
+                    return mb_stripos($target, $q) !== false;
+                });
+            }
+
+            usort($blogs, function($a, $b) use ($sort, $order, $userMap) {
+                $valA = ''; $valB = '';
+                if ($sort === 'title') { $valA = mb_strtolower($a['title']); $valB = mb_strtolower($b['title']); }
+                elseif ($sort === 'author') { $valA = mb_strtolower($userMap[$a['author_id'] ?? ''] ?? ''); $valB = mb_strtolower($userMap[$b['author_id'] ?? ''] ?? ''); }
+                elseif ($sort === 'created_at') { $valA = strtotime($a['created_at'] ?? 'now'); $valB = strtotime($b['created_at'] ?? 'now'); }
+                else { $valA = strtotime($a['updated_at'] ?? 'now'); $valB = strtotime($b['updated_at'] ?? 'now'); }
+                
+                if ($valA == $valB) return 0;
+                if ($order === 'asc') return ($valA < $valB) ? -1 : 1;
+                return ($valA > $valB) ? -1 : 1;
+            });
+
+            $perPage = 20;
+            $total = count($blogs);
+            $maxPage = max(1, ceil($total / $perPage));
+            if ($p > $maxPage) $p = $maxPage;
+            $pagedBlogs = array_slice($blogs, ($p - 1) * $perPage, $perPage);
+
+            echo "<form method='GET' style='margin-bottom:20px; background:#f8f9fa; padding:15px; border-radius:4px; border:1px solid #dee2e6; display:flex; flex-wrap:wrap; gap:10px; align-items:center;'>";
+            echo "<div><label for='search'>記事検索:</label> <input type='text' id='search' name='q' value='".htmlspecialchars($q)."' style='width:200px; margin-bottom:0;'></div>";
+            echo "<div><label>並べ替え: <select name='sort' style='margin-bottom:0; width:auto;'>";
+            echo "<option value='updated_at' ".($sort==='updated_at'?'selected':'').">更新日時</option>";
+            echo "<option value='created_at' ".($sort==='created_at'?'selected':'').">作成日時</option>";
+            echo "<option value='title' ".($sort==='title'?'selected':'').">タイトル</option>";
+            echo "<option value='author' ".($sort==='author'?'selected':'').">作成者</option>";
+            echo "</select></label> ";
+            echo "<select name='order' style='margin-bottom:0; width:auto;'><option value='desc' ".($order==='desc'?'selected':'').">降順</option><option value='asc' ".($order==='asc'?'selected':'').">昇順</option></select></div>";
+            echo "<div><button type='submit' class='btn'>適用</button> ";
+            if ($q || isset($_GET['sort'])) echo "<a href='{$baseUrl}cms/blogs_admin' style='margin-left:10px;'>クリア</a>";
+            echo "</div>";
+            echo "<div style='margin-left:auto;'><a href='{$baseUrl}cms/contents/edit?type=blog' class='btn' style='background:#28a745;'>+ ブログを新規作成</a></div>";
+            echo "</form>";
+
+            echo "<div style='font-size:0.9em; color:#666; margin-bottom:10px;'>全 {$total} 件中 ".(($p-1)*$perPage+1)." - ".min($total, $p*$perPage)." 件を表示</div>";
+            echo "<table><thead><tr><th>タイトル</th><th>作成者</th><th>作成日時 / 更新日時</th><th>カテゴリ / タグ</th><th>操作</th></tr></thead><tbody>";
+            foreach ($pagedBlogs as $b) {
                 $cName = '-';
                 if (!empty($b['category_id'])) {
                     foreach($categories as $c) if($c['id'] === $b['category_id']) { $cName = $c['name']; break; }
                 }
                 $tags = !empty($b['tags']) ? implode(', ', $b['tags']) : '-';
+                $authorName = $userMap[$b['author_id'] ?? ''] ?? '不明';
                 
-                echo "<tr><td>" . htmlspecialchars($b['title']) . "</td><td>".htmlspecialchars($cName)."</td><td>".htmlspecialchars($tags)."</td><td>/blog/" . htmlspecialchars($b['slug'] ?? '') . "</td>";
-                echo "<td><a href='{$baseUrl}cms/contents/edit?id=".urlencode($b['id'])."'>編集</a>";
-                if ($isAdminOrSpecial) echo " <form action='{$baseUrl}cms/contents/delete' method='POST' style='display:inline;' onsubmit='return confirm(\"本当に削除しますか？\")'><input type='hidden' name='id' value='".htmlspecialchars($b['id'])."'><button type='submit' class='btn' style='background:#dc3545; padding:5px 10px; font-size:0.9em;'>削除</button></form>";
+                $cDate = date('Y-m-d H:i', strtotime($b['created_at'] ?? 'now'));
+                $uDate = date('Y-m-d H:i', strtotime($b['updated_at'] ?? 'now'));
+
+                echo "<tr>";
+                echo "<td><a href='{$baseUrl}blog/" . htmlspecialchars($b['slug'] ?? '') . "' target='_blank' style='font-weight:bold;text-decoration:none;color:#0056b3;'>" . htmlspecialchars($b['title']) . " ↗</a></td>";
+                echo "<td>" . htmlspecialchars($authorName) . "</td>";
+                echo "<td style='font-size:0.9em;'>作: {$cDate}<br>更: {$uDate}</td>";
+                echo "<td style='font-size:0.9em;'>カ: ".htmlspecialchars($cName)."<br>タ: ".htmlspecialchars($tags)."</td>";
+                echo "<td><a href='{$baseUrl}cms/contents/edit?id=".urlencode($b['id'])."' class='btn' style='padding:5px 10px; font-size:0.9em; margin-right:5px;'>編集</a>";
+                if ($isAdminOrSpecial) echo "<form action='{$baseUrl}cms/contents/delete' method='POST' style='display:inline;' onsubmit='return confirm(\"本当に削除しますか？\")'><input type='hidden' name='id' value='".htmlspecialchars($b['id'])."'><input type='hidden' name='return_to' value='cms/blogs_admin'><button type='submit' class='btn' style='background:#dc3545; padding:5px 10px; font-size:0.9em;'>削除</button></form>";
                 echo "</td></tr>";
             }
-            echo "</tbody></table></section></main></body></html>"; return;
+            if (empty($pagedBlogs)) echo "<tr><td colspan='5'>記事が見つかりません。</td></tr>";
+            echo "</tbody></table>";
+
+            if ($maxPage > 1) {
+                echo "<div style='margin-top:20px; display:flex; gap:5px; justify-content:center;'>";
+                for ($i = 1; $i <= $maxPage; $i++) {
+                    $qStr = http_build_query(['q'=>$q, 'sort'=>$sort, 'order'=>$order, 'p'=>$i]);
+                    if ($i === $p) echo "<span style='padding:5px 10px; background:#007bff; color:#fff; border-radius:3px;'>{$i}</span>";
+                    else echo "<a href='{$baseUrl}cms/blogs_admin?{$qStr}' style='padding:5px 10px; background:#e9ecef; text-decoration:none; color:#333; border-radius:3px;'>{$i}</a>";
+                }
+                echo "</div>";
+            }
+            echo "</main></body></html>"; return;
         }
 
         // ==========================================
@@ -2528,8 +2719,9 @@ HTML;
         if ($path === 'cms/contents/edit') {
             $id = $_GET['id'] ?? '';
             $requestedType = $_GET['type'] ?? 'blog';
+            $slugPrefix = $_GET['slug_prefix'] ?? ''; // 通常ページ新規作成時の初期ディレクトリ
             $formData = [
-                'id' => '', 'title' => '', 'slug' => '', 'type' => $requestedType, 'body' => '', 
+                'id' => '', 'title' => '', 'slug' => $slugPrefix, 'type' => $requestedType, 'body' => '', 
                 'meta_description' => '', 'version' => 1, 'author_id' => $currentUser['id'], 
                 'slash_policy' => 'default', 'redirect_url' => '', 'custom_head' => '', 'custom_bottom' => ''
             ];
@@ -2588,7 +2780,10 @@ HTML;
                         $result = $this->contentModel->save($formData, (int)$_POST['base_version']);
                         if ($result['success']) { 
                             $this->writeLog($currentUser, 'Content Saved', "Title: {$formData['title']}");
-                            header("Location: {$baseUrl}cms/contents"); exit; 
+                            // ★ 保存後のリダイレクト先を種類に応じて変更
+                            if ($isPage) header("Location: {$baseUrl}cms/pages"); 
+                            else header("Location: {$baseUrl}cms/blogs_admin"); 
+                            exit; 
                         } else {
                             if ($result['error'] === 'conflict') {
                                 $currentData = $result['current_data'];
@@ -2749,7 +2944,8 @@ HTML;
             }
             echo "</div></fieldset>";
 
-            echo "<button type='submit' class='btn' style='margin-right:10px;'>保存する</button> <a href='{$baseUrl}cms/contents' class='btn' style='background:#6c757d;'>キャンセル</a></form>";
+            $cancelUrl = $isPage ? "{$baseUrl}cms/pages" : "{$baseUrl}cms/blogs_admin";
+            echo "<button type='submit' class='btn' style='margin-right:10px;'>保存する</button> <a href='{$cancelUrl}' class='btn' style='background:#6c757d;'>キャンセル</a></form>";
             
             echo <<<JS
 <script src='https://cdn.jsdelivr.net/npm/marked/marked.min.js'></script>
