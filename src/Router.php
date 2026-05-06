@@ -399,7 +399,7 @@ class Router {
             $header = $this->injectHeadTags($header, $errorPage['meta_description'] ?? '', $errorPage['title'] ?? "{$code} Error", '', $errorPage['custom_head'] ?? '');
             $header = $this->replaceVariables($header, $baseUrl);
             echo $header;
-            echo "<main>" . $this->replaceVariables($errorPage['body'], $baseUrl) . "</main>";
+            echo $this->replaceVariables($errorPage['body'], $baseUrl);
             $footer = $this->templateModel->renderFooter();
             if (!empty($errorPage['custom_bottom'])) {
                 if (stripos($footer, '</body>') !== false) {
@@ -598,7 +598,7 @@ HTML;
                 $header = $this->injectHeadTags($header, $indexPage['meta_description'] ?? '', $indexPage['title'] ?? '', $canonicalUrl, $indexPage['custom_head'] ?? '');
                 $header = $this->replaceVariables($header, $baseUrl);
                 echo $header;
-                echo "<main>" . $this->replaceVariables($indexPage['body'], $baseUrl) . "</main>";
+                echo $this->replaceVariables($indexPage['body'], $baseUrl);
                 
                 $footer = $this->templateModel->renderFooter();
                 if (!empty($indexPage['custom_bottom'])) {
@@ -2348,6 +2348,7 @@ JS;
                     $newSettings['site_search_enabled'] = !empty($_POST['site_search_enabled']);
                     $newSettings['blog_date_type'] = $_POST['blog_date_type'] ?? 'updated_at';
                     $newSettings['allow_user_email_change'] = !empty($_POST['allow_user_email_change']);
+                    $newSettings['blog_edit_policy'] = $_POST['blog_edit_policy'] ?? 'only_own';
                     $newSettings['allow_member_revisions'] = !empty($_POST['allow_member_revisions']);
                     
                     $newSettings['upload_allow_general'] = !empty($_POST['upload_allow_general']);
@@ -2378,7 +2379,15 @@ JS;
                 
                 $dt = $settings['blog_date_type'] ?? 'updated_at';
                 echo "<label>ブログの基準日時: <select name='blog_date_type' style='width:auto; display:inline-block;'><option value='updated_at' ".($dt==='updated_at'?'selected':'').">更新日時</option><option value='created_at' ".($dt==='created_at'?'selected':'').">作成日時</option></select></label><br><br>";
-                echo "<label>最新記事として独立表示する件数: <input type='number' name='blog_latest_count' value='".htmlspecialchars($settings['blog_latest_count'] ?? 5)."' min='1' max='50' style='width:80px; display:inline-block;'></label>";
+                echo "<label>最新記事として独立表示する件数: <input type='number' name='blog_latest_count' value='".htmlspecialchars($settings['blog_latest_count'] ?? 5)."' min='1' max='50' style='width:80px; display:inline-block;'></label><br><br>";
+                
+                $blogEditPolicy = $settings['blog_edit_policy'] ?? 'only_own';
+                echo "<label>一般部員のブログ編集権限: <select name='blog_edit_policy' style='width:auto; display:inline-block;'>";
+                echo "<option value='only_own' ".($blogEditPolicy==='only_own'?'selected':'').">自身が作成した記事のみ編集・削除可能 (デフォルト)</option>";
+                echo "<option value='all' ".($blogEditPolicy==='all'?'selected':'').">誰の記事でも編集・削除可能</option>";
+                echo "<option value='allowed_only' ".($blogEditPolicy==='allowed_only'?'selected':'').">自身作成 ＋ 許可された記事のみ編集・削除可能 (リクエスト機能あり)</option>";
+                echo "</select></label>";
+                
                 echo "</fieldset>";
 
                 echo "<fieldset><legend>ファイルアップロード・画像設定 (管理者のみ)</legend>";
@@ -2536,8 +2545,23 @@ HTML;
             if ($id) {
                 $content = $this->contentModel->getById($id);
                 if ($content) {
-                    if (!$isAdminOrSpecial && $content['author_id'] !== $currentUser['id']) {
-                        $_SESSION['flash_error'] = "他のユーザーが作成した記事は削除できません。";
+                    $canDelete = false;
+                    if ($isAdminOrSpecial) {
+                        $canDelete = true;
+                    } else {
+                        $policy = $settings['blog_edit_policy'] ?? 'only_own';
+                        if ($content['author_id'] === $currentUser['id']) {
+                            $canDelete = true;
+                        } elseif ($policy === 'all') {
+                            $canDelete = true;
+                        } elseif ($policy === 'allowed_only') {
+                            $allowed = $content['allowed_editors'] ?? [];
+                            if (in_array($currentUser['id'], $allowed)) $canDelete = true;
+                        }
+                    }
+
+                    if (!$canDelete) {
+                        $_SESSION['flash_error'] = "この記事を削除する権限がありません。";
                     } else {
                         $this->contentModel->delete($id);
                         $this->writeLog($currentUser, 'Content Deleted', "Title: {$content['title']}");
@@ -2848,6 +2872,36 @@ HTML;
         }
 
         // ==========================================
+        // ★ 記事の編集リクエスト
+        // ==========================================
+        if ($path === 'cms/contents/request_edit') {
+            $id = $_GET['id'] ?? '';
+            $article = $this->contentModel->getById($id);
+            if (!$article) {
+                $_SESSION['flash_error'] = "記事が見つかりません。";
+                header("Location: {$baseUrl}cms/blogs_admin"); exit;
+            }
+
+            if ($method === 'POST') {
+                $requests = $article['edit_requests'] ?? [];
+                if (!in_array($currentUser['id'], $requests)) {
+                    $requests[] = $currentUser['id'];
+                    $article['edit_requests'] = $requests;
+                    $this->contentModel->save($article, $article['version']);
+                }
+                $_SESSION['flash_message'] = "編集リクエストを送信しました。";
+                header("Location: {$baseUrl}cms/blogs_admin"); exit;
+            }
+
+            echo $adminHead . "<h1>編集リクエスト</h1>";
+            echo "<div style='background:#fff; padding:20px; border-radius:4px; border:1px solid #dee2e6;'>";
+            echo "<p>記事「" . htmlspecialchars($article['title']) . "」の編集権限がありません。<br>管理者に編集権限をリクエストしますか？</p>";
+            echo "<form method='POST'><button type='submit' class='btn'>管理者に編集リクエストを送信する</button> <a href='{$baseUrl}cms/blogs_admin' class='btn' style='background:#6c757d;'>戻る</a></form>";
+            echo "</div></main></body></html>";
+            return;
+        }
+
+        // ==========================================
         // ★ 記事編集
         // ==========================================
         if ($path === 'cms/contents/edit') {
@@ -2869,9 +2923,27 @@ HTML;
                 } elseif ($id) {
                     $existingData = $this->contentModel->getById($id);
                     if ($existingData) {
-                        if (!$isAdminOrSpecial && $existingData['author_id'] !== $currentUser['id']) {
-                            $_SESSION['flash_error'] = "他のユーザーの記事は編集できません。";
-                            header("Location: {$baseUrl}cms/blogs_admin"); exit;
+                        if (!$isAdminOrSpecial) {
+                            $policy = $settings['blog_edit_policy'] ?? 'only_own';
+                            $canEdit = false;
+                            if ($existingData['author_id'] === $currentUser['id']) {
+                                $canEdit = true;
+                            } elseif ($policy === 'all') {
+                                $canEdit = true;
+                            } elseif ($policy === 'allowed_only') {
+                                $allowed = $existingData['allowed_editors'] ?? [];
+                                if (in_array($currentUser['id'], $allowed)) $canEdit = true;
+                            }
+                            
+                            if (!$canEdit) {
+                                if ($policy === 'allowed_only') {
+                                    $_SESSION['flash_error'] = "この記事の編集権限がありません。";
+                                    header("Location: {$baseUrl}cms/contents/request_edit?id={$id}"); exit;
+                                } else {
+                                    $_SESSION['flash_error'] = "他のユーザーの記事は編集できません。";
+                                    header("Location: {$baseUrl}cms/blogs_admin"); exit;
+                                }
+                            }
                         }
                         $formData = array_merge($formData, $existingData);
                     } else {
@@ -2891,12 +2963,52 @@ HTML;
             if ($method === 'POST') {
                 $formData = $_POST;
                 $formData['version'] = $_POST['base_version'] ?? 1;
-                $formData['author_id'] = $currentUser['id'];
+                
                 $isPage = ($formData['type'] === 'page');
 
                 if ($isPage && !$isAdminOrSpecial) {
                     $_SESSION['flash_error'] = "通常ページの編集権限がありません。";
                     header("Location: {$baseUrl}dashboard"); exit;
+                }
+                
+                $existingData = $id ? $this->contentModel->getById($id) : null;
+                $formData['author_id'] = $existingData ? $existingData['author_id'] : $currentUser['id'];
+
+                if (!$isPage && !$isAdminOrSpecial && $existingData) {
+                    $policy = $settings['blog_edit_policy'] ?? 'only_own';
+                    $canEdit = false;
+                    if ($existingData['author_id'] === $currentUser['id']) {
+                        $canEdit = true;
+                    } elseif ($policy === 'all') {
+                        $canEdit = true;
+                    } elseif ($policy === 'allowed_only') {
+                        $allowed = $existingData['allowed_editors'] ?? [];
+                        if (in_array($currentUser['id'], $allowed)) $canEdit = true;
+                    }
+                    if (!$canEdit) {
+                        $_SESSION['flash_error'] = "保存する権限がありません。";
+                        $_SESSION['recovery_post'] = $_POST;
+                        header("Location: {$baseUrl}cms/contents/edit?id={$id}"); exit;
+                    }
+                }
+
+                if ($isAdminOrSpecial && !$isPage) {
+                    $allowed = isset($formData['allowed_editors_str']) ? array_filter(array_map('trim', explode(',', $formData['allowed_editors_str']))) : ($existingData['allowed_editors'] ?? []);
+                    if (isset($_POST['approve_requests']) && is_array($_POST['approve_requests'])) {
+                        foreach ($_POST['approve_requests'] as $appId) {
+                            if (!in_array($appId, $allowed)) $allowed[] = $appId;
+                        }
+                    }
+                    $formData['allowed_editors'] = $allowed;
+                    
+                    $requests = $existingData['edit_requests'] ?? [];
+                    if (isset($_POST['approve_requests']) && is_array($_POST['approve_requests'])) {
+                        $requests = array_diff($requests, $_POST['approve_requests']);
+                    }
+                    $formData['edit_requests'] = array_values($requests);
+                } elseif ($existingData) {
+                    if (isset($existingData['allowed_editors'])) $formData['allowed_editors'] = $existingData['allowed_editors'];
+                    if (isset($existingData['edit_requests'])) $formData['edit_requests'] = $existingData['edit_requests'];
                 }
 
                 if ($formData['type'] === 'blog' && empty($formData['slug'])) $formData['slug'] = date('YmdHis');
@@ -3045,6 +3157,25 @@ HTML;
                 }
             }
             echo "</fieldset>";
+            
+            if ($isAdminOrSpecial && !$isPage && ($settings['blog_edit_policy'] ?? '') === 'allowed_only') {
+                echo "<fieldset><legend>編集権限設定 (許可された記事のみ設定時)</legend>";
+                $requests = $formData['edit_requests'] ?? [];
+                if (!empty($requests)) {
+                    echo "<p><strong>編集リクエスト:</strong></p><ul style='list-style:none; padding-left:0;'>";
+                    $users = $this->userModel->getAll();
+                    $userMap = []; foreach($users as $u) $userMap[$u['id']] = $u['name'];
+                    foreach ($requests as $reqUserId) {
+                        $name = $userMap[$reqUserId] ?? $reqUserId;
+                        echo "<li><label><input type='checkbox' name='approve_requests[]' value='".htmlspecialchars($reqUserId)."'> " . htmlspecialchars($name) . " の編集を許可する</label></li>";
+                    }
+                    echo "</ul>";
+                }
+                $allowed = $formData['allowed_editors'] ?? [];
+                echo "<label>現在許可されているユーザー (IDカンマ区切り):</label>";
+                echo "<input type='text' name='allowed_editors_str' value='".htmlspecialchars(implode(',', $allowed))."'>";
+                echo "</fieldset>";
+            }
 
             $customVars = [];
             $rawVars = $settings['variables'] ?? '';
