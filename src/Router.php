@@ -1109,14 +1109,20 @@ HTML;
         
         $currentUser = $this->auth->getCurrentUser();
         $isAdminOrSpecial = $isSystemPath ? in_array($currentUser['role'], ['admin', 'special']) : false;
-        
-        // ★ 通常ページ管理へのアクセス権限チェック
-        if ($path === 'cms/pages' && !$isAdminOrSpecial) {
-            $_SESSION['flash_error'] = "権限がありません。";
-            header("Location: {$baseUrl}dashboard"); exit;
-        }
-
         $adminHead = $isSystemPath ? $this->getAdminHead($baseUrl, $currentUser, $isAdminOrSpecial) : '';
+
+        // ★ 全てのシステム画面で権限チェックを行い、権限がなければ403エラー画面を表示
+        if ($isSystemPath && strpos($path, 'login') !== 0 && $path !== 'logout' && $path !== 'dashboard' && strpos($path, 'cms/profile') !== 0 && strpos($path, 'cms/2fa') !== 0) {
+            $adminOnly = ['cms/settings/mail', 'cms/settings/2fa', 'cms/settings/2fa/manage', 'cms/settings/2fa/backup', 'cms/logs', 'cms/logs/download', 'cms/backups', 'cms/backups/export', 'cms/backups/import', 'cms/users', 'cms/users/edit', 'cms/users/csv_upload', 'cms/users/csv_map'];
+            $specialOnly = ['cms/pages', 'cms/categories', 'cms/templates'];
+            
+            if (in_array($path, $adminOnly) && $currentUser['role'] !== 'admin') {
+                $this->renderErrorPage(403, $baseUrl, "権限がありません。", $adminHead);
+            }
+            if (in_array($path, $specialOnly) && !$isAdminOrSpecial) {
+                $this->renderErrorPage(403, $baseUrl, "権限がありません。", $adminHead);
+            }
+        }
 
         if ($path === 'dashboard') {
             $roles = ['admin' => '管理者', 'special' => '特別部員', 'general' => '一般部員'];
@@ -2342,6 +2348,7 @@ JS;
                     $newSettings['site_search_enabled'] = !empty($_POST['site_search_enabled']);
                     $newSettings['blog_date_type'] = $_POST['blog_date_type'] ?? 'updated_at';
                     $newSettings['allow_user_email_change'] = !empty($_POST['allow_user_email_change']);
+                    $newSettings['allow_member_revisions'] = !empty($_POST['allow_member_revisions']);
                     
                     $newSettings['upload_allow_general'] = !empty($_POST['upload_allow_general']);
                     $newSettings['upload_allowed_exts'] = trim($_POST['upload_allowed_exts'] ?? 'jpg, jpeg, png, gif, webp, pdf, zip, txt');
@@ -2363,7 +2370,8 @@ JS;
             if ($currentUser['role'] === 'admin') {
                 echo "<fieldset><legend>ブログ・全体機能拡張 (管理者のみ)</legend>";
                 echo "<label><input type='checkbox' name='site_search_enabled' value='1' ".(!empty($settings['site_search_enabled'])?'checked':'')."> サイト内全体検索機能を有効にする</label><br><br>";
-                echo "<label><input type='checkbox' name='allow_user_email_change' value='1' ".(!empty($settings['allow_user_email_change'])?'checked':'')."> 一般ユーザーによる自身のメールアドレス変更を許可する</label><br><br>";
+                echo "<label><input type='checkbox' name='allow_user_email_change' value='1' ".(!empty($settings['allow_user_email_change'])?'checked':'')."> 一般ユーザーによる自身のメールアドレス変更を許可する</label><br>";
+                echo "<label><input type='checkbox' name='allow_member_revisions' value='1' ".(!empty($settings['allow_member_revisions'])?'checked':'')."> 一般・特別部員にも記事の変更履歴(リビジョン)復元機能の利用を許可する</label><br><br>";
                 echo "<label><input type='checkbox' name='blog_category_enabled' value='1' ".(!empty($settings['blog_category_enabled'])?'checked':'')."> カテゴリ機能を有効にする</label><br>";
                 echo "<label><input type='checkbox' name='blog_category_required' value='1' ".(!empty($settings['blog_category_required'])?'checked':'')."> 記事作成時にカテゴリ付けを必須にする</label><br><br>";
                 echo "<label><input type='checkbox' name='blog_tag_enabled' value='1' ".(!empty($settings['blog_tag_enabled'])?'checked':'')."> タグ機能を有効にする</label><br><br>";
@@ -2764,6 +2772,82 @@ HTML;
         }
 
         // ==========================================
+        // ★ 変更履歴 (リビジョン) 管理
+        // ==========================================
+        if ($path === 'cms/contents/revisions') {
+            $id = $_GET['id'] ?? '';
+            $allowRevisions = ($currentUser['role'] === 'admin') || !empty($settings['allow_member_revisions']);
+            if (!$allowRevisions || !$id) {
+                $this->renderErrorPage(403, $baseUrl, "権限がないか、記事が指定されていません。", $adminHead);
+            }
+            $content = $this->contentModel->getById($id);
+            if (!$content) $this->renderErrorPage(404, $baseUrl, "記事が見つかりません。", $adminHead);
+            
+            echo $adminHead . "<h1>変更履歴 (リビジョン): " . htmlspecialchars($content['title']) . "</h1>";
+            echo "<p><a href='{$baseUrl}cms/contents/edit?id=".urlencode($id)."' class='btn' style='background:#6c757d;'>← 編集画面に戻る</a></p>";
+            
+            $revisions = $this->contentModel->getRevisions($id);
+            if (empty($revisions)) {
+                echo "<p>保存された過去の履歴はありません。</p></main></body></html>";
+                return;
+            }
+            
+            $viewVersion = $_GET['v'] ?? '';
+            if ($viewVersion !== '') {
+                $revData = $this->contentModel->getRevision($id, $viewVersion);
+                if ($revData) {
+                    echo "<div style='background:#fff3cd; padding:15px; border:1px solid #ffeeba; border-radius:4px; margin-bottom:20px;'>";
+                    echo "<h3 style='margin-top:0;'>バージョン {$viewVersion} の内容</h3>";
+                    echo "<p><strong>タイトル:</strong> ".htmlspecialchars($revData['title'])."</p>";
+                    echo "<div style='background:#fff; padding:10px; border:1px solid #ccc; max-height:300px; overflow-y:auto;'><pre style='margin:0; white-space:pre-wrap;'>".htmlspecialchars($revData['body'])."</pre></div>";
+                    echo "<form method='POST' action='{$baseUrl}cms/contents/restore' style='margin-top:15px;' onsubmit='return confirm(\"現在の記事をこのバージョンの内容で完全に上書き復元します。よろしいですか？\");'>";
+                    echo "<input type='hidden' name='id' value='".htmlspecialchars($id)."'>";
+                    echo "<input type='hidden' name='version' value='".htmlspecialchars($viewVersion)."'>";
+                    echo "<button type='submit' class='btn' style='background:#dc3545;'>このバージョンを復元する</button>";
+                    echo "</form></div>";
+                }
+            }
+
+            echo "<table><thead><tr><th>バージョン</th><th>保存日時</th><th>操作</th></tr></thead><tbody>";
+            foreach ($revisions as $rev) {
+                echo "<tr><td>v" . htmlspecialchars($rev['version']) . "</td>";
+                echo "<td>" . htmlspecialchars($rev['updated_at'] ?? $rev['created_at']) . "</td>";
+                echo "<td><a href='{$baseUrl}cms/contents/revisions?id=".urlencode($id)."&v=".htmlspecialchars($rev['version'])."' class='btn' style='padding:4px 8px; font-size:0.9em;'>中身を確認</a></td></tr>";
+            }
+            echo "</tbody></table></main></body></html>";
+            return;
+        }
+
+        if ($path === 'cms/contents/restore' && $method === 'POST') {
+            $id = $_POST['id'] ?? '';
+            $version = $_POST['version'] ?? '';
+            $allowRevisions = ($currentUser['role'] === 'admin') || !empty($settings['allow_member_revisions']);
+            
+            if ($allowRevisions && $id && $version) {
+                $revData = $this->contentModel->getRevision($id, $version);
+                if ($revData) {
+                    $currentData = $this->contentModel->getById($id);
+                    if ($currentData) {
+                        $currentData['title'] = $revData['title'];
+                        $currentData['body'] = $revData['body'];
+                        if (isset($revData['meta_description'])) $currentData['meta_description'] = $revData['meta_description'];
+                        if (isset($revData['slug'])) $currentData['slug'] = $revData['slug'];
+                        if (isset($revData['tags'])) $currentData['tags'] = $revData['tags'];
+                        if (isset($revData['category_id'])) $currentData['category_id'] = $revData['category_id'];
+                        
+                        $this->contentModel->save($currentData, $currentData['version']);
+                        $_SESSION['flash_message'] = "バージョン {$version} の状態に復元しました。";
+                        header("Location: {$baseUrl}cms/contents/edit?id=" . urlencode($id));
+                        exit;
+                    }
+                }
+            }
+            $_SESSION['flash_error'] = "復元に失敗しました。";
+            header("Location: {$baseUrl}cms/contents/edit?id=" . urlencode($id));
+            exit;
+        }
+
+        // ==========================================
         // ★ 記事編集
         // ==========================================
         if ($path === 'cms/contents/edit') {
@@ -2904,6 +2988,14 @@ HTML;
             }
 
             echo $adminHead . "<h1>" . ($isPage ? '通常ページ' : 'ブログ記事') . "の編集</h1>";
+            if ($error) echo "<div class='alert alert-error'>$error</div>";
+            
+            // ★ リビジョン復元画面へのボタン
+            $allowRevisions = ($currentUser['role'] === 'admin') || !empty($settings['allow_member_revisions']);
+            if ($id && $allowRevisions) {
+                echo "<div style='text-align:right; margin-bottom:15px;'><a href='{$baseUrl}cms/contents/revisions?id=".urlencode($id)."' class='btn' style='background:#17a2b8;'>🕒 変更履歴 (リビジョン) を確認・復元</a></div>";
+            }
+            
             echo "<form id='edit-form' method='POST'>";
             echo "<input type='hidden' name='id' value='".htmlspecialchars($formData['id'])."'>";
             echo "<input type='hidden' name='base_version' value='".htmlspecialchars($formData['version'] ?? 1)."'>";
