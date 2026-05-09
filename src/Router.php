@@ -122,7 +122,7 @@ class Router {
             } else { $text = str_replace('{{blog_tags}}', '', $text); }
         }
         if (strpos($text, '{{blog_archives}}') !== false) {
-            $allBlogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
+            $allBlogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog' && ($c['status'] ?? 'published') === 'published'; });
             $archives = [];
             foreach ($allBlogs as $b) {
                 $bDate = !empty($b[$dateField]) ? $b[$dateField] : ($b['updated_at'] ?? 'now');
@@ -152,7 +152,9 @@ class Router {
             $sort = $_GET['sort'] ?? ($q !== '' ? 'score' : 'date');
             $order = $_GET['order'] ?? 'desc';
 
-            $allBlogs = array_filter($q !== '' ? $this->contentModel->getAllFull() : $this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
+            $allBlogs = array_filter($q !== '' ? $this->contentModel->getAllFull() : $this->contentModel->getAll(), function($c) { 
+                return $c['type'] === 'blog' && ($c['status'] ?? 'published') === 'published'; 
+            });
             $filteredBlogs = [];
             foreach ($allBlogs as $b) {
                 $bDate = !empty($b[$dateField]) ? $b[$dateField] : ($b['updated_at'] ?? 'now');
@@ -279,7 +281,9 @@ class Router {
             $sort = $args['sort'] ?? 'date';
             $showArchive = isset($args['archive']) && $args['archive'] === 'true';
             
-            $blogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
+            $blogs = array_filter($this->contentModel->getAll(), function($c) { 
+                return $c['type'] === 'blog' && ($c['status'] ?? 'published') === 'published'; 
+            });
             
             $filteredBlogs = [];
             foreach ($blogs as $b) {
@@ -357,7 +361,7 @@ class Router {
         return $text;
     }
 
-    private function injectHeadTags($html, $pageMetaDesc = '', $pageTitle = '', $canonicalUrl = '', $customHead = '') {
+    private function injectHeadTags($html, $pageMetaDesc = '', $pageTitle = '', $canonicalUrl = '', $customHead = '', $noindex = false) {
         $settings = $this->getSettings();
         $defaultDesc = $settings['seo_description'] ?? '';
         $keywords = $settings['seo_keywords'] ?? '';
@@ -378,6 +382,7 @@ class Router {
         if ($canonicalUrl !== '') $tags .= "<link rel=\"canonical\" href=\"" . htmlspecialchars($canonicalUrl) . "\">\n";
         if ($desc !== '') $tags .= "<meta name=\"description\" content=\"" . htmlspecialchars($desc) . "\">\n";
         if (trim($keywords) !== '') $tags .= "<meta name=\"keywords\" content=\"" . htmlspecialchars(trim($keywords)) . "\">\n";
+        if ($noindex) $tags .= "<meta name=\"robots\" content=\"noindex, nofollow\">\n";
         if (trim($globalCustomHead) !== '') $tags .= trim($globalCustomHead) . "\n";
         if (trim($customHead) !== '') $tags .= trim($customHead) . "\n";
 
@@ -430,7 +435,7 @@ class Router {
         $this->auth->completeLogin($user);
         if (isset($_SESSION['expired_user_id']) && $_SESSION['expired_user_id'] !== $user['id']) unset($_SESSION['recovery_post']);
         unset($_SESSION['expired_user_id']);
-        $redirect = $_SESSION['redirect_url'] ?? "{$baseUrl}dashboard";
+        $redirect = $_SESSION['redirect_url'] ?? "{$baseUrl}cms/dashboard";
         unset($_SESSION['redirect_url']);
         header("Location: " . $redirect); exit;
     }
@@ -462,7 +467,7 @@ class Router {
     .alert-error { background: #f8d7da; color: #721c24; border-color: #f5c6cb; }
 </style></head><body>
 <aside class="sidebar" aria-label="管理メニュー"><h2>CMS Menu</h2><nav><ul>
-    <li><a href="{$baseUrl}dashboard">ダッシュボード</a></li>
+    <li><a href="{$baseUrl}cms/dashboard">ダッシュボード</a></li>
 HTML;
         if ($isAdminOrSpecial) {
             $head .= "<li><a href='{$baseUrl}cms/pages'>通常ページ管理</a></li>";
@@ -485,11 +490,10 @@ HTML;
     <li><a href="{$baseUrl}cms/profile">プロフィール設定</a></li>
     <li><a href="{$baseUrl}cms/2fa">マイTOTP設定</a></li>
     <li><a href="{$baseUrl}" target="_blank">サイトを確認 ↗</a></li>
-    <li><a href="{$baseUrl}logout">ログアウト</a></li>
+    <li><a href="{$baseUrl}cms/logout">ログアウト</a></li>
 </ul></nav></aside><main class="main-content">
 HTML;
         
-        // ★ フラッシュメッセージの展開表示
         $flashMsg = $_SESSION['flash_message'] ?? '';
         $flashErr = $_SESSION['flash_error'] ?? '';
         unset($_SESSION['flash_message'], $_SESSION['flash_error']);
@@ -514,7 +518,9 @@ HTML;
         $requestUriPath = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
         $hasTrailingSlash = (substr($requestUriPath, -1) === '/');
         $isHome = ($requestUriPath === '/' || rtrim($requestUriPath, '/') === rtrim($baseUrl, '/'));
-        $isSystemPath = (strpos($path, 'cms/') === 0 || strpos($path, 'login') === 0 || $path === 'logout' || $path === 'dashboard' || strpos($path, 'assets/') === 0);
+        
+        // ★ URLをすべて cms 以下に変更
+        $isSystemPath = (strpos($path, 'cms/') === 0 || strpos($path, 'assets/') === 0);
 
         $cleanPath = rtrim($path, '/');
         if ($cleanPath === '') $cleanPath = 'index'; 
@@ -567,6 +573,9 @@ HTML;
             echo $this->replaceVariables($this->templateModel->get('style.css'), $baseUrl); return;
         }
 
+        // ==========================================
+        // メディア (ファイル) の公開アクセス
+        // ==========================================
         if (preg_match('#^uploads/(.+)$#', $cleanPath, $matches)) {
             $filename = basename($matches[1]);
             $filepath = __DIR__ . '/../data/uploads/' . $filename;
@@ -586,9 +595,21 @@ HTML;
             $this->renderErrorPage(404, $baseUrl, "ファイルが見つかりません。");
         }
 
+        // ==========================================
+        // 公開エリア（フロントエンド）
+        // ==========================================
         if ($cleanPath === 'index' || $isHome) {
             $indexPage = $this->contentModel->getBySlug('index', 'page');
             if ($indexPage) {
+                if (($indexPage['status'] ?? 'published') === 'draft') {
+                    $canViewDraft = false;
+                    if ($this->auth->isLoggedIn()) {
+                        $user = $this->auth->getCurrentUser();
+                        if (in_array($user['role'], ['admin', 'special'])) $canViewDraft = true;
+                    }
+                    if (!$canViewDraft) $this->renderErrorPage(404, $baseUrl, "お探しのページは見つかりませんでした。");
+                }
+
                 if (!empty($indexPage['redirect_url'])) {
                     header("Location: " . $indexPage['redirect_url'], true, 301);
                     exit;
@@ -623,9 +644,10 @@ HTML;
             
             $results = [];
             if ($q !== '') {
-                // 検索時はフルデータを取得する
                 $allContents = $this->contentModel->getAllFull();
                 foreach ($allContents as $c) {
+                    if (($c['status'] ?? 'published') === 'draft') continue;
+
                     $c['score'] = 0;
                     $searchStrTitle = mb_strtolower($c['title']);
                     $searchStrBody = mb_strtolower($c['body'] ?? '');
@@ -742,7 +764,23 @@ HTML;
             $article = $this->contentModel->getBySlug($matches[1], 'blog');
             if (!$article) $this->renderErrorPage(404, $baseUrl, "お探しの記事は見つかりませんでした。");
 
-            $allBlogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
+            if (($article['status'] ?? 'published') === 'draft') {
+                $canViewDraft = false;
+                if ($this->auth->isLoggedIn()) {
+                    $user = $this->auth->getCurrentUser();
+                    if ($user['role'] === 'admin' || $article['author_id'] === $user['id']) {
+                        $canViewDraft = true;
+                    } else {
+                        $policy = $settings['blog_edit_policy'] ?? 'only_own';
+                        if ($policy === 'all' || ($policy === 'allowed_only' && in_array($user['id'], $article['allowed_editors'] ?? []))) {
+                            $canViewDraft = true;
+                        }
+                    }
+                }
+                if (!$canViewDraft) $this->renderErrorPage(404, $baseUrl, "お探しの記事は見つかりませんでした。");
+            }
+
+            $allBlogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog' && ($c['status'] ?? 'published') === 'published'; });
             usort($allBlogs, function($a, $b) use ($dateField) {
                 $aDate = !empty($a[$dateField]) ? $a[$dateField] : ($a['updated_at'] ?? 'now');
                 $bDate = !empty($b[$dateField]) ? $b[$dateField] : ($b['updated_at'] ?? 'now');
@@ -817,12 +855,15 @@ HTML;
 
             $blogFormat = $settings['blog_title_format'] ?? '{{title}}';
             $customTitle = str_replace('{{title}}', $article['title'] ?? '', $blogFormat);
+            
+            $draftPrefix = ($article['status'] ?? 'published') === 'draft' ? '【下書き】 ' : '';
+            
             $blogLayout = $this->replaceVariables($blogLayout, $baseUrl);
             
             $safeBodyJson = json_encode($article['body'], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
             
             $header = $this->templateModel->renderHeader($baseUrl);
-            $header = $this->injectHeadTags($header, '', $customTitle, $canonicalUrl);
+            $header = $this->injectHeadTags($header, '', $draftPrefix . $customTitle, $canonicalUrl);
             $header = $this->replaceVariables($header, $baseUrl);
             echo $header;
             
@@ -838,11 +879,11 @@ HTML;
         }
 
         // ==========================================
-        // ログイン・認証プロセス
+        // 3. ログイン・二段階認証 (2FA) 処理
         // ==========================================
-        if ($path === 'login') {
+        if ($path === 'cms/login') {
             if ($this->auth->isLoggedIn()) { 
-                $redirect = $_SESSION['redirect_url'] ?? "{$baseUrl}dashboard";
+                $redirect = $_SESSION['redirect_url'] ?? "{$baseUrl}cms/dashboard";
                 unset($_SESSION['redirect_url']);
                 header("Location: " . $redirect); exit; 
             }
@@ -861,7 +902,7 @@ HTML;
                     $user = $this->userModel->findByStudentId($_POST['student_id']);
                     $this->processSuccessfulLogin($user, $baseUrl, $settings);
                 } elseif ($loginResult === 'requires_totp') {
-                    header("Location: {$baseUrl}login/totp"); exit;
+                    header("Location: {$baseUrl}cms/login/totp"); exit;
                 } elseif ($loginResult === 'requires_email') {
                     $user = $this->userModel->findById($_SESSION['pending_2fa_user_id']);
                     if (empty($user['email'])) {
@@ -875,7 +916,7 @@ HTML;
 
                         $mailer = new Mailer($settings);
                         $mailer->send($user['email'], "ログイン確認コード", "ログインするための確認コードです。\n\nコード：{$code}\n\n※このコードは10分間有効です。");
-                        header("Location: {$baseUrl}login/email"); exit;
+                        header("Location: {$baseUrl}cms/login/email"); exit;
                     }
                 } elseif ($loginResult === 'locked') {
                     $this->writeLog(null, 'Login Failed', "Locked ID: {$_POST['student_id']}");
@@ -889,7 +930,7 @@ HTML;
                     $error = "IDまたはパスワードが違います。"; 
                 }
             }
-            echo "<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'><title>ログイン | CMS</title><style>body{font-family:sans-serif;background:#f4f4f4;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}main{background:#fff;padding:30px;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,0.1);}</style></head><body>";
+            echo "<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'><meta name='robots' content='noindex, nofollow'><title>ログイン | CMS</title><style>body{font-family:sans-serif;background:#f4f4f4;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}main{background:#fff;padding:30px;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,0.1);}</style></head><body>";
             echo "<main><form method='POST'><fieldset style='border:none; padding:0;'><legend><h1>部員用ログイン</h1></legend>";
             if ($error) echo "<p role='alert' style='color:red;'>$error</p>";
             echo "<label for='student_id'>学籍番号/ID:</label><br><input type='text' id='student_id' name='student_id' required aria-required='true' style='width:100%;margin-bottom:15px;padding:8px;'><br>";
@@ -899,8 +940,8 @@ HTML;
             return;
         }
 
-        if ($path === 'login/totp') {
-            if (empty($_SESSION['pending_2fa_user_id'])) { header("Location: {$baseUrl}login"); exit; }
+        if ($path === 'cms/login/totp') {
+            if (empty($_SESSION['pending_2fa_user_id'])) { header("Location: {$baseUrl}cms/login"); exit; }
             $user = $this->userModel->findById($_SESSION['pending_2fa_user_id']);
             $error = '';
             
@@ -916,7 +957,7 @@ HTML;
 
                         $mailer = new Mailer($settings);
                         $mailer->send($user['email'], "ログイン確認コード", "ログインするための確認コードです。\n\nコード：{$code}\n\n※このコードは10分間有効です。");
-                        header("Location: {$baseUrl}login/email"); exit;
+                        header("Location: {$baseUrl}cms/login/email"); exit;
                     }
                 } else {
                     $code = preg_replace('/[^0-9A-Za-z]/', '', $_POST['code'] ?? '');
@@ -943,7 +984,7 @@ HTML;
                     }
                 }
             }
-            echo "<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'><title>二段階認証 | CMS</title><style>body{font-family:sans-serif;background:#f4f4f4;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}main{background:#fff;padding:30px;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,0.1);}</style></head><body>";
+            echo "<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'><meta name='robots' content='noindex, nofollow'><title>二段階認証 | CMS</title><style>body{font-family:sans-serif;background:#f4f4f4;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}main{background:#fff;padding:30px;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,0.1);}</style></head><body>";
             echo "<main><form method='POST'><fieldset style='border:none; padding:0;'><legend><h1>二段階認証 (TOTP)</h1></legend>";
             if ($error) echo "<p role='alert' style='color:red;'>$error</p>";
             echo "<p>認証アプリの6桁のコード、またはバックアップコードを入力してください。</p>";
@@ -961,12 +1002,12 @@ HTML;
             if (in_array($mode, ['email_totp_optional', 'email_totp_required'])) {
                 echo "<form method='POST' style='margin-top:20px;text-align:center;'><input type='hidden' name='action' value='use_email'><button type='submit' style='background:none;border:none;color:#0056b3;text-decoration:underline;cursor:pointer;font-size:1em;padding:0;'>メール認証を使用する</button></form>";
             }
-            echo "<p style='text-align:center;margin-top:20px;'><a href='{$baseUrl}login'>キャンセルして戻る</a></p></main></body></html>";
+            echo "<p style='text-align:center;margin-top:20px;'><a href='{$baseUrl}cms/login'>キャンセルして戻る</a></p></main></body></html>";
             return;
         }
 
-        if ($path === 'login/email') {
-            if (empty($_SESSION['pending_2fa_user_id'])) { header("Location: {$baseUrl}login"); exit; }
+        if ($path === 'cms/login/email') {
+            if (empty($_SESSION['pending_2fa_user_id'])) { header("Location: {$baseUrl}cms/login"); exit; }
             $user = $this->userModel->findById($_SESSION['pending_2fa_user_id']);
             $error = '';
             if ($method === 'POST') {
@@ -980,7 +1021,7 @@ HTML;
                     if ($mode === 'email_totp_required' && empty($user['totp_secret'])) {
                         $_SESSION['setup_totp_allowed'] = true;
                         $_SESSION['pending_trust_device'] = !empty($_POST['trust_device']);
-                        header("Location: {$baseUrl}login/setup_totp"); exit;
+                        header("Location: {$baseUrl}cms/login/setup_totp"); exit;
                     } else {
                         $this->writeLog($user, '2FA Email Login', 'Success');
                         $this->processSuccessfulLogin($user, $baseUrl, $settings);
@@ -989,7 +1030,7 @@ HTML;
                     $error = "確認コードが正しくありません。";
                 }
             }
-            echo "<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'><title>メール認証 | CMS</title><style>body{font-family:sans-serif;background:#f4f4f4;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}main{background:#fff;padding:30px;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,0.1);}</style></head><body>";
+            echo "<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'><meta name='robots' content='noindex, nofollow'><title>メール認証 | CMS</title><style>body{font-family:sans-serif;background:#f4f4f4;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}main{background:#fff;padding:30px;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,0.1);}</style></head><body>";
             echo "<main><form method='POST'><fieldset style='border:none; padding:0;'><legend><h1>メール認証</h1></legend>";
             if ($error) echo "<p role='alert' style='color:red;'>$error</p>";
             echo "<p>登録メールアドレスに送信された6桁の確認コードを入力してください。</p>";
@@ -1001,12 +1042,12 @@ HTML;
             }
 
             echo "<button type='submit' style='width:100%;padding:10px;background:#0056b3;color:#fff;border:none;border-radius:4px;'>認証して次へ</button>";
-            echo "</fieldset></form><p style='text-align:center;margin-top:20px;'><a href='{$baseUrl}login'>キャンセルして戻る</a></p></main></body></html>";
+            echo "</fieldset></form><p style='text-align:center;margin-top:20px;'><a href='{$baseUrl}cms/login'>キャンセルして戻る</a></p></main></body></html>";
             return;
         }
 
-        if ($path === 'login/setup_totp') {
-            if (empty($_SESSION['pending_2fa_user_id']) || empty($_SESSION['setup_totp_allowed'])) { header("Location: {$baseUrl}login"); exit; }
+        if ($path === 'cms/login/setup_totp') {
+            if (empty($_SESSION['pending_2fa_user_id']) || empty($_SESSION['setup_totp_allowed'])) { header("Location: {$baseUrl}cms/login"); exit; }
             $user = $this->userModel->findById($_SESSION['pending_2fa_user_id']);
 
             $secret = $_SESSION['temp_totp_secret'] ?? TOTP::generateSecret();
@@ -1055,12 +1096,12 @@ HTML;
                     if (isset($_SESSION['expired_user_id']) && $_SESSION['expired_user_id'] !== $user['id']) unset($_SESSION['recovery_post']);
                     unset($_SESSION['expired_user_id']);
                     
-                    header("Location: {$baseUrl}login/backup"); exit;
+                    header("Location: {$baseUrl}cms/login/backup"); exit;
                 } else {
                     $error = "認証コードが正しくありません。";
                 }
             }
-            echo "<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'><title>TOTP 初期設定 | CMS</title><style>body{font-family:sans-serif;background:#f4f4f4;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}main{background:#fff;padding:30px;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,0.1);max-width:400px;}</style></head><body>";
+            echo "<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'><meta name='robots' content='noindex, nofollow'><title>TOTP 初期設定 | CMS</title><style>body{font-family:sans-serif;background:#f4f4f4;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}main{background:#fff;padding:30px;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,0.1);max-width:400px;}</style></head><body>";
             echo "<main><h1>二段階認証の強制セットアップ</h1>";
             echo "<p>システム管理者の設定により、認証アプリ(TOTP)の登録が必須となっています。</p>";
             if ($error) echo "<p style='color:red;'>$error</p>";
@@ -1073,13 +1114,13 @@ HTML;
             return;
         }
 
-        if ($path === 'login/backup') {
+        if ($path === 'cms/login/backup') {
             $codes = $_SESSION['flash_backup_codes'] ?? [];
             unset($_SESSION['flash_backup_codes']);
-            $redirect = $_SESSION['redirect_url'] ?? "{$baseUrl}dashboard";
+            $redirect = $_SESSION['redirect_url'] ?? "{$baseUrl}cms/dashboard";
             unset($_SESSION['redirect_url']);
             
-            echo "<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'><title>バックアップコード | CMS</title><style>body{font-family:sans-serif;background:#f4f4f4;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}main{background:#fff;padding:30px;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,0.1);max-width:400px;}</style></head><body>";
+            echo "<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'><meta name='robots' content='noindex, nofollow'><title>バックアップコード | CMS</title><style>body{font-family:sans-serif;background:#f4f4f4;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}main{background:#fff;padding:30px;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,0.1);max-width:400px;}</style></head><body>";
             echo "<main><h1>バックアップコード</h1>";
             echo "<div style='padding:10px; background:#f8d7da; color:#721c24; border:1px solid #f5c6cb; border-radius:4px; margin-bottom:15px;'><strong>警告: 以下のバックアップコードは一度しか表示されません。必ず安全な場所に保存してください。</strong></div>";
             echo "<div style='background:#fff3cd; padding:20px; font-family:monospace; font-size:1.2em; text-align:center;'>";
@@ -1088,22 +1129,22 @@ HTML;
             return;
         }
 
-        if ($path === 'logout') { 
+        if ($path === 'cms/logout') { 
             $this->writeLog($this->auth->getCurrentUser(), 'Logout', 'Success');
-            $this->auth->logout(); header("Location: {$baseUrl}login"); exit; 
+            $this->auth->logout(); header("Location: {$baseUrl}cms/login"); exit; 
         }
 
         // ==========================================
         // 4. 管理画面（バックエンド・認証必須エリア）
         // ==========================================
         
-        if ($isSystemPath && strpos($path, 'login') !== 0 && $path !== 'logout' && strpos($path, 'assets/') !== 0) {
+        if ($isSystemPath && strpos($path, 'cms/login') !== 0 && $path !== 'cms/logout' && strpos($path, 'assets/') !== 0) {
             if (!$this->auth->isLoggedIn()) {
                 if ($method === 'POST' && isset($_SESSION['expired_user_id']) && strpos($path, 'cms/contents/edit') === 0) {
                     $_SESSION['recovery_post'] = $_POST;
                 }
                 if ($method === 'GET' || $method === 'POST') $_SESSION['redirect_url'] = $_SERVER['REQUEST_URI'];
-                header("Location: {$baseUrl}login"); exit;
+                header("Location: {$baseUrl}cms/login"); exit;
             }
         }
         
@@ -1112,7 +1153,7 @@ HTML;
         $adminHead = $isSystemPath ? $this->getAdminHead($baseUrl, $currentUser, $isAdminOrSpecial) : '';
 
         // ★ 全てのシステム画面で権限チェックを行い、権限がなければ403エラー画面を表示
-        if ($isSystemPath && strpos($path, 'login') !== 0 && $path !== 'logout' && $path !== 'dashboard' && strpos($path, 'cms/profile') !== 0 && strpos($path, 'cms/2fa') !== 0) {
+        if ($isSystemPath && strpos($path, 'cms/login') !== 0 && $path !== 'cms/logout' && $path !== 'cms/dashboard' && strpos($path, 'cms/profile') !== 0 && strpos($path, 'cms/2fa') !== 0) {
             $adminOnly = ['cms/settings/mail', 'cms/settings/2fa', 'cms/settings/2fa/manage', 'cms/settings/2fa/backup', 'cms/logs', 'cms/logs/download', 'cms/backups', 'cms/backups/export', 'cms/backups/import', 'cms/users', 'cms/users/edit', 'cms/users/csv_upload', 'cms/users/csv_map'];
             $specialOnly = ['cms/pages', 'cms/categories', 'cms/templates'];
             
@@ -1124,11 +1165,32 @@ HTML;
             }
         }
 
-        if ($path === 'dashboard') {
+        if ($path === 'cms/dashboard') {
             $roles = ['admin' => '管理者', 'special' => '特別部員', 'general' => '一般部員'];
             $roleLabel = $roles[$currentUser['role']] ?? '不明';
             echo $adminHead . "<h1>ダッシュボード</h1><p>ようこそ、" . htmlspecialchars($currentUser['name'] ?? '部員') . "さん。</p>";
-            echo "<div class='alert' style='background:#e9ecef; border-color:#dee2e6; color:#333; max-width: 400px;'><strong>あなたの現在の権限:</strong> " . htmlspecialchars($roleLabel) . "</div></main></body></html>";
+            echo "<div class='alert' style='background:#e9ecef; border-color:#dee2e6; color:#333; max-width: 400px;'><strong>あなたの現在の権限:</strong> " . htmlspecialchars($roleLabel) . "</div>";
+
+            if ($isAdminOrSpecial) {
+                $reqBlogs = [];
+                $allBlogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
+                foreach ($allBlogs as $b) {
+                    if (!empty($b['edit_requests'])) {
+                        $reqBlogs[] = $b;
+                    }
+                }
+                if (!empty($reqBlogs)) {
+                    echo "<h2>未処理の編集リクエスト</h2><ul style='list-style:none; padding:0;'>";
+                    foreach ($reqBlogs as $b) {
+                        echo "<li style='margin-bottom:10px; padding:10px; background:#fff3cd; border:1px solid #ffeeba; border-radius:4px;'>";
+                        echo "記事: <a href='{$baseUrl}cms/contents/edit?id=".urlencode($b['id'])."'>" . htmlspecialchars($b['title']) . "</a>";
+                        echo "</li>";
+                    }
+                    echo "</ul>";
+                }
+            }
+
+            echo "</main></body></html>";
             return;
         }
 
@@ -1443,10 +1505,9 @@ JS;
         }
 
         // ==========================================
-        // 各種設定 (メール)
+        // 管理機能（各種設定、マイTOTP設定など）
         // ==========================================
         if ($path === 'cms/settings/mail' && $currentUser['role'] === 'admin') {
-            $msg = ''; $err = '';
             if ($method === 'POST') {
                 if (isset($_POST['action']) && $_POST['action'] === 'test_mail') {
                     $mailer = new Mailer($settings);
@@ -1472,6 +1533,7 @@ JS;
             }
 
             echo $adminHead . "<h1>メール送信設定</h1>";
+
             echo "<p>この画面では、ログインシステムがメールを送信する際の設定を行います。<br>sendmail（PHP mail）または SMTP のどちらかを選択できます。</p>";
             echo "<form id='edit-form' method='POST'><fieldset><legend>■ メール送信方式</legend>";
             echo "<label><input type='radio' name='mail_method' value='sendmail' ".(($settings['mail_method']??'sendmail')==='sendmail'?'checked':'')."> sendmail (PHP mail)</label><br>";
@@ -1497,9 +1559,6 @@ JS;
             return;
         }
 
-        // ==========================================
-        // 2FA全体設定・ユーザー別管理 (管理者)
-        // ==========================================
         if ($path === 'cms/settings/2fa' && $currentUser['role'] === 'admin') {
             if ($method === 'POST') {
                 $err = '';
@@ -1531,7 +1590,7 @@ JS;
                     $u = $this->userModel->findById($_POST['target_user']);
                     if ($u && !empty($u['email'])) {
                         $mailer = new Mailer($settings);
-                        $body = "{$u['name']} 様\n\n管理者より二段階認証（TOTP）の設定が許可されました。\n以下のURLからログインし、「マイTOTP設定」より設定を完了してください。\n\n{$baseUrl}login";
+                        $body = "{$u['name']} 様\n\n管理者より二段階認証（TOTP）の設定が許可されました。\n以下のURLからログインし、「マイTOTP設定」より設定を完了してください。\n\n{$baseUrl}cms/login";
                         if ($mailer->send($u['email'], "二段階認証の設定について", $body)) {
                             $_SESSION['flash_message'] = "{$u['name']} に設定案内メールを送信しました。";
                         } else {
@@ -1655,7 +1714,7 @@ JS;
 
             if ($mode === 'none' || $mode === 'email') {
                 $_SESSION['flash_error'] = "現在、ユーザーによるTOTP設定は無効化されています。";
-                header("Location: {$baseUrl}dashboard"); exit;
+                header("Location: {$baseUrl}cms/dashboard"); exit;
             }
 
             if ($path === 'cms/2fa') {
@@ -2007,6 +2066,7 @@ JS;
             $users = $this->userModel->getAll();
             if ($search) $users = array_filter($users, function($u) use ($search) { return (stripos($u['student_id'] ?? '', $search) !== false) || (stripos($u['name'] ?? '', $search) !== false); });
             
+            // 並べ替え用にインデックスと計算済みの値を保持
             foreach ($users as $index => &$u) {
                 $u['_index'] = $index;
                 $u['_grade'] = !empty($u['grade']) ? $u['grade'] : $this->userModel->calculateGrade($u['student_id']);
@@ -2347,9 +2407,12 @@ JS;
                     $newSettings['blog_latest_count'] = (int)($_POST['blog_latest_count'] ?? 5);
                     $newSettings['site_search_enabled'] = !empty($_POST['site_search_enabled']);
                     $newSettings['blog_date_type'] = $_POST['blog_date_type'] ?? 'updated_at';
+                    
                     $newSettings['allow_user_email_change'] = !empty($_POST['allow_user_email_change']);
-                    $newSettings['blog_edit_policy'] = $_POST['blog_edit_policy'] ?? 'only_own';
                     $newSettings['allow_member_revisions'] = !empty($_POST['allow_member_revisions']);
+                    $newSettings['notify_edit_request'] = !empty($_POST['notify_edit_request']);
+                    $newSettings['allow_blog_draft'] = !empty($_POST['allow_blog_draft']);
+                    $newSettings['blog_edit_policy'] = $_POST['blog_edit_policy'] ?? 'only_own';
                     
                     $newSettings['upload_allow_general'] = !empty($_POST['upload_allow_general']);
                     $newSettings['upload_allowed_exts'] = trim($_POST['upload_allowed_exts'] ?? 'jpg, jpeg, png, gif, webp, pdf, zip, txt');
@@ -2372,7 +2435,11 @@ JS;
                 echo "<fieldset><legend>ブログ・全体機能拡張 (管理者のみ)</legend>";
                 echo "<label><input type='checkbox' name='site_search_enabled' value='1' ".(!empty($settings['site_search_enabled'])?'checked':'')."> サイト内全体検索機能を有効にする</label><br><br>";
                 echo "<label><input type='checkbox' name='allow_user_email_change' value='1' ".(!empty($settings['allow_user_email_change'])?'checked':'')."> 一般ユーザーによる自身のメールアドレス変更を許可する</label><br>";
-                echo "<label><input type='checkbox' name='allow_member_revisions' value='1' ".(!empty($settings['allow_member_revisions'])?'checked':'')."> 一般・特別部員にも記事の変更履歴(リビジョン)復元機能の利用を許可する</label><br><br>";
+                echo "<label><input type='checkbox' name='allow_member_revisions' value='1' ".(!empty($settings['allow_member_revisions'])?'checked':'')."> 一般・特別部員にも記事の変更履歴(リビジョン)復元機能の利用を許可する</label><br>";
+                echo "<label><input type='checkbox' name='notify_edit_request' value='1' ".(!empty($settings['notify_edit_request'])?'checked':'')."> 編集リクエストがあった場合に管理者にメール通知する</label><br><br>";
+                
+                echo "<label><input type='checkbox' name='allow_blog_draft' value='1' ".(!empty($settings['allow_blog_draft'])?'checked':'')."> 一般部員・特別部員にもブログの下書き(非公開)保存を許可する</label><br><br>";
+
                 echo "<label><input type='checkbox' name='blog_category_enabled' value='1' ".(!empty($settings['blog_category_enabled'])?'checked':'')."> カテゴリ機能を有効にする</label><br>";
                 echo "<label><input type='checkbox' name='blog_category_required' value='1' ".(!empty($settings['blog_category_required'])?'checked':'')."> 記事作成時にカテゴリ付けを必須にする</label><br><br>";
                 echo "<label><input type='checkbox' name='blog_tag_enabled' value='1' ".(!empty($settings['blog_tag_enabled'])?'checked':'')."> タグ機能を有効にする</label><br><br>";
@@ -2439,27 +2506,25 @@ JS;
             echo "<label>共通CSS</label><textarea name='css' style='height:150px; font-family:monospace;'>" . htmlspecialchars($this->templateModel->get('style.css')) . "</textarea>";
             
             $defaultBlogLayout = <<<HTML
-<main>
-    <article>
-        <h1 style='margin-bottom: 5px;'>{{title}}</h1>
-        <div style='color:#666; font-size:0.9em; margin-bottom:20px; border-bottom:1px solid #ccc; padding-bottom:10px;'>
-            作成日: <time datetime='{{created_at}}'>{{created_at_date}}</time> {{updated_at_text}} {{category_html}} {{tags_html}}
-        </div>
-        <div id='md-content'></div>
-    </article>
-    <div style='display:flex; justify-content:space-between; margin-top:30px; padding-top:20px; border-top:1px solid #eee;'>
-        <div>
-            {{if_prev}}
-                <a href="{{prev_url}}">&laquo; {{prev_title}}</a>
-            {{/if_prev}}
-        </div>
-        <div>
-            {{if_next}}
-                <a href="{{next_url}}">{{next_title}} &raquo;</a>
-            {{/if_next}}
-        </div>
+<article>
+    <h1 style='margin-bottom: 5px;'>{{title}}</h1>
+    <div style='color:#666; font-size:0.9em; margin-bottom:20px; border-bottom:1px solid #ccc; padding-bottom:10px;'>
+        作成日: <time datetime='{{created_at}}'>{{created_at_date}}</time> {{updated_at_text}} {{category_html}} {{tags_html}}
     </div>
-</main>
+    <div id='md-content'></div>
+</article>
+<div style='display:flex; justify-content:space-between; margin-top:30px; padding-top:20px; border-top:1px solid #eee;'>
+    <div>
+        {{if_prev}}
+            <a href="{{prev_url}}">&laquo; {{prev_title}}</a>
+        {{/if_prev}}
+    </div>
+    <div>
+        {{if_next}}
+            <a href="{{next_url}}">{{next_title}} &raquo;</a>
+        {{/if_next}}
+    </div>
+</div>
 HTML;
             $savedBlogLayout = $settings['blog_layout'] ?? $defaultBlogLayout;
             if (trim($savedBlogLayout) === '') $savedBlogLayout = $defaultBlogLayout;
@@ -2540,6 +2605,9 @@ HTML;
             return;
         }
 
+        // ==========================================
+        // 記事・ページ管理 (一覧・削除・編集)
+        // ==========================================
         if ($path === 'cms/contents/delete' && $method === 'POST') {
             $id = $_POST['id'] ?? '';
             if ($id) {
@@ -2578,11 +2646,6 @@ HTML;
         }
 
         if ($path === 'cms/pages') {
-            if (!$isAdminOrSpecial) {
-                $_SESSION['flash_error'] = "通常ページ管理の権限がありません。";
-                header("Location: {$baseUrl}dashboard"); exit;
-            }
-
             echo $adminHead . "<h1>通常ページ管理</h1>";
             echo "<p style='font-size:0.9em;color:#666;margin-top:-10px;'>※スラッグを <code>404</code> や <code>403</code> などのステータスコードにすると、システムのエラーページとして自動的に使われます。</p>";
 
@@ -2628,7 +2691,7 @@ HTML;
                 $parentDir = strpos($slug, '/') !== false ? substr($slug, 0, strrpos($slug, '/')) : '';
                 if ($slug === 'index' && $currentDir === '') $parentDir = '';
                 if ($parentDir === $currentDir) {
-                    $items[] = ['is_dir' => false, 'id' => $p['id'], 'name' => basename($slug), 'title' => $p['title'], 'slug' => $slug];
+                    $items[] = ['is_dir' => false, 'id' => $p['id'], 'name' => basename($slug), 'title' => $p['title'], 'slug' => $slug, 'status' => $p['status'] ?? 'published'];
                 }
             }
 
@@ -2682,9 +2745,10 @@ HTML;
                     echo "<td><a href='{$baseUrl}cms/pages?dir={$item['path']}' style='text-decoration:none; color:#0056b3; font-weight:bold;'>" . htmlspecialchars($item['name']) . "</a></td>";
                     echo "<td style='color:#6c757d;'>- (フォルダ) -</td><td></td>";
                 } else {
+                    $statusLabel = ($item['status'] ?? 'published') === 'draft' ? '<span style="color:red; font-size:0.85em; font-weight:bold;">[下書き]</span> ' : '';
                     echo "<td style='text-align:center; font-size:1.2em; color:#6c757d;'>📄</td>";
                     echo "<td>" . htmlspecialchars($item['name']) . "</td>";
-                    echo "<td>" . htmlspecialchars($item['title']) . "</td>";
+                    echo "<td>{$statusLabel}" . htmlspecialchars($item['title']) . "</td>";
                     echo "<td><a href='{$baseUrl}cms/contents/edit?id=".urlencode($item['id'])."' class='btn' style='padding:4px 8px; font-size:0.85em; margin-right:5px;'>編集</a>";
                     echo "<form action='{$baseUrl}cms/contents/delete' method='POST' style='display:inline;' onsubmit='return confirm(\"本当に削除しますか？\")'><input type='hidden' name='id' value='".htmlspecialchars($item['id'])."'><input type='hidden' name='return_to' value='cms/pages?dir={$currentDir}'><button type='submit' class='btn' style='background:#dc3545; padding:4px 8px; font-size:0.85em;'>削除</button></form></td>";
                 }
@@ -2706,8 +2770,7 @@ HTML;
             $order = $_GET['order'] ?? 'desc';
             $p = max(1, (int)($_GET['p'] ?? 1));
 
-            // 検索キーワードがある場合のみ、本文も含まれるフルデータを取得する
-            $blogs = array_filter($q !== '' ? $this->contentModel->getAllFull() : $this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
+            $blogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
             $categories = $this->contentModel->getCategories();
             
             $users = $this->userModel->getAll();
@@ -2717,7 +2780,7 @@ HTML;
             if ($q !== '') {
                 $blogs = array_filter($blogs, function($b) use ($q, $userMap) {
                     $authorName = $userMap[$b['author_id'] ?? ''] ?? '不明';
-                    $target = $b['title'] . ' ' . ($b['body'] ?? '') . ' ' . $authorName;
+                    $target = $b['title'] . ' ' . $b['body'] . ' ' . $authorName;
                     return mb_stripos($target, $q) !== false;
                 });
             }
@@ -2768,14 +2831,32 @@ HTML;
                 $cDate = date('Y-m-d H:i', strtotime($b['created_at'] ?? 'now'));
                 $uDate = date('Y-m-d H:i', strtotime($b['updated_at'] ?? 'now'));
 
+                $statusLabel = ($b['status'] ?? 'published') === 'draft' ? '<span style="color:red; font-size:0.85em; font-weight:bold;">[下書き]</span> ' : '';
+
                 echo "<tr>";
-                echo "<td><a href='{$baseUrl}blog/" . htmlspecialchars($b['slug'] ?? '') . "' target='_blank' style='font-weight:bold;text-decoration:none;color:#0056b3;'>" . htmlspecialchars($b['title']) . " ↗</a></td>";
+                echo "<td>{$statusLabel}<a href='{$baseUrl}blog/" . htmlspecialchars($b['slug'] ?? '') . "' target='_blank' style='font-weight:bold;text-decoration:none;color:#0056b3;'>" . htmlspecialchars($b['title']) . " ↗</a></td>";
                 echo "<td>" . htmlspecialchars($authorName) . "</td>";
                 echo "<td style='font-size:0.9em;'>作: {$cDate}<br>更: {$uDate}</td>";
                 echo "<td style='font-size:0.9em;'>カ: ".htmlspecialchars($cName)."<br>タ: ".htmlspecialchars($tags)."</td>";
                 
                 echo "<td><a href='{$baseUrl}cms/contents/edit?id=".urlencode($b['id'])."' class='btn' style='padding:5px 10px; font-size:0.9em; margin-right:5px;'>編集</a>";
-                if ($isAdminOrSpecial || $b['author_id'] === $currentUser['id']) {
+                
+                $canDelete = false;
+                if ($isAdminOrSpecial) {
+                    $canDelete = true;
+                } else {
+                    $policy = $settings['blog_edit_policy'] ?? 'only_own';
+                    if ($b['author_id'] === $currentUser['id']) {
+                        $canDelete = true;
+                    } elseif ($policy === 'all') {
+                        $canDelete = true;
+                    } elseif ($policy === 'allowed_only') {
+                        $allowed = $b['allowed_editors'] ?? [];
+                        if (in_array($currentUser['id'], $allowed)) $canDelete = true;
+                    }
+                }
+                
+                if ($canDelete) {
                     echo "<form action='{$baseUrl}cms/contents/delete' method='POST' style='display:inline;' onsubmit='return confirm(\"本当に削除しますか？\")'><input type='hidden' name='id' value='".htmlspecialchars($b['id'])."'><input type='hidden' name='return_to' value='cms/blogs_admin'><button type='submit' class='btn' style='background:#dc3545; padding:5px 10px; font-size:0.9em;'>削除</button></form>";
                 }
                 echo "</td></tr>";
@@ -2793,6 +2874,46 @@ HTML;
                 echo "</div>";
             }
             echo "</main></body></html>"; return;
+        }
+
+        // ==========================================
+        // ★ 記事の編集リクエスト
+        // ==========================================
+        if ($path === 'cms/contents/request_edit') {
+            $id = $_GET['id'] ?? '';
+            $article = $this->contentModel->getById($id);
+            if (!$article) {
+                $_SESSION['flash_error'] = "記事が見つかりません。";
+                header("Location: {$baseUrl}cms/blogs_admin"); exit;
+            }
+
+            if ($method === 'POST') {
+                $requests = $article['edit_requests'] ?? [];
+                if (!in_array($currentUser['id'], $requests)) {
+                    $requests[] = $currentUser['id'];
+                    $article['edit_requests'] = $requests;
+                    $this->contentModel->save($article, $article['version']);
+                    
+                    if (!empty($settings['notify_edit_request'])) {
+                        $adminUsers = array_filter($this->userModel->getAll(), function($u) { return $u['role'] === 'admin' && !empty($u['email']); });
+                        if (!empty($adminUsers)) {
+                            $mailer = new Mailer($settings);
+                            foreach ($adminUsers as $admin) {
+                                $mailer->send($admin['email'], "【CMS】記事の編集リクエスト", "ユーザー「{$currentUser['name']}」が記事「{$article['title']}」の編集権限をリクエストしています。\n\nダッシュボードから確認してください。\n{$baseUrl}cms/contents/edit?id={$id}");
+                            }
+                        }
+                    }
+                }
+                $_SESSION['flash_message'] = "編集リクエストを送信しました。";
+                header("Location: {$baseUrl}cms/blogs_admin"); exit;
+            }
+
+            echo $adminHead . "<h1>編集リクエスト</h1>";
+            echo "<div style='background:#fff; padding:20px; border-radius:4px; border:1px solid #dee2e6;'>";
+            echo "<p>記事「" . htmlspecialchars($article['title']) . "」の編集権限がありません。<br>管理者に編集権限をリクエストしますか？</p>";
+            echo "<form method='POST'><button type='submit' class='btn'>管理者に編集リクエストを送信する</button> <a href='{$baseUrl}cms/blogs_admin' class='btn' style='background:#6c757d;'>戻る</a></form>";
+            echo "</div></main></body></html>";
+            return;
         }
 
         // ==========================================
@@ -2872,36 +2993,6 @@ HTML;
         }
 
         // ==========================================
-        // ★ 記事の編集リクエスト
-        // ==========================================
-        if ($path === 'cms/contents/request_edit') {
-            $id = $_GET['id'] ?? '';
-            $article = $this->contentModel->getById($id);
-            if (!$article) {
-                $_SESSION['flash_error'] = "記事が見つかりません。";
-                header("Location: {$baseUrl}cms/blogs_admin"); exit;
-            }
-
-            if ($method === 'POST') {
-                $requests = $article['edit_requests'] ?? [];
-                if (!in_array($currentUser['id'], $requests)) {
-                    $requests[] = $currentUser['id'];
-                    $article['edit_requests'] = $requests;
-                    $this->contentModel->save($article, $article['version']);
-                }
-                $_SESSION['flash_message'] = "編集リクエストを送信しました。";
-                header("Location: {$baseUrl}cms/blogs_admin"); exit;
-            }
-
-            echo $adminHead . "<h1>編集リクエスト</h1>";
-            echo "<div style='background:#fff; padding:20px; border-radius:4px; border:1px solid #dee2e6;'>";
-            echo "<p>記事「" . htmlspecialchars($article['title']) . "」の編集権限がありません。<br>管理者に編集権限をリクエストしますか？</p>";
-            echo "<form method='POST'><button type='submit' class='btn'>管理者に編集リクエストを送信する</button> <a href='{$baseUrl}cms/blogs_admin' class='btn' style='background:#6c757d;'>戻る</a></form>";
-            echo "</div></main></body></html>";
-            return;
-        }
-
-        // ==========================================
         // ★ 記事編集
         // ==========================================
         if ($path === 'cms/contents/edit') {
@@ -2951,10 +3042,9 @@ HTML;
                         header("Location: {$baseUrl}cms/blogs_admin"); exit;
                     }
                 } else {
-                    // 新規の通常ページ作成時に権限チェック
                     if ($requestedType === 'page' && !$isAdminOrSpecial) {
                         $_SESSION['flash_error'] = "通常ページの作成権限がありません。";
-                        header("Location: {$baseUrl}dashboard"); exit;
+                        header("Location: {$baseUrl}cms/dashboard"); exit;
                     }
                 }
             }
@@ -2968,7 +3058,7 @@ HTML;
 
                 if ($isPage && !$isAdminOrSpecial) {
                     $_SESSION['flash_error'] = "通常ページの編集権限がありません。";
-                    header("Location: {$baseUrl}dashboard"); exit;
+                    header("Location: {$baseUrl}cms/dashboard"); exit;
                 }
                 
                 $existingData = $id ? $this->contentModel->getById($id) : null;
@@ -3022,7 +3112,9 @@ HTML;
                     $formData['tags'] = $tagArray;
                 }
                 
-                $forbidden = ['data', 'src', 'views', 'assets', 'cms', 'api', 'login', 'logout', 'dashboard', 'index', 'blogs', 'blog', 'search'];
+                $formData['status'] = $_POST['status'] ?? 'published';
+
+                $forbidden = ['data', 'src', 'views', 'assets', 'cms', 'api', 'search'];
                 $slugParts = explode('/', $formData['slug'] ?? '');
                 $firstDir = strtolower($slugParts[0]);
 
@@ -3100,9 +3192,7 @@ HTML;
             }
 
             echo $adminHead . "<h1>" . ($isPage ? '通常ページ' : 'ブログ記事') . "の編集</h1>";
-            if ($error) echo "<div class='alert alert-error'>$error</div>";
             
-            // ★ リビジョン復元画面へのボタン
             $allowRevisions = ($currentUser['role'] === 'admin') || !empty($settings['allow_member_revisions']);
             if ($id && $allowRevisions) {
                 echo "<div style='text-align:right; margin-bottom:15px;'><a href='{$baseUrl}cms/contents/revisions?id=".urlencode($id)."' class='btn' style='background:#17a2b8;'>🕒 変更履歴 (リビジョン) を確認・復元</a></div>";
@@ -3115,6 +3205,14 @@ HTML;
             
             echo "<fieldset><legend>基本情報</legend>";
             echo "<label>タイトル <span style='color:red;'>*</span></label><input type='text' name='title' value='".htmlspecialchars($formData['title'])."' required>";
+            
+            echo "<label>公開状態</label><select name='status'>";
+            echo "<option value='published' ".(($formData['status'] ?? 'published') === 'published' ? 'selected' : '').">公開</option>";
+            $allowDraft = $isPage ? true : ($currentUser['role'] === 'admin' || !empty($settings['allow_blog_draft']));
+            if ($allowDraft || ($formData['status'] ?? 'published') === 'draft') {
+                echo "<option value='draft' ".(($formData['status'] ?? 'published') === 'draft' ? 'selected' : '').">下書き / 非公開</option>";
+            }
+            echo "</select>";
             
             if ($isPage) {
                 echo "<label>URL階層（スラッグ） <span style='color:red;'>*</span></label><input type='text' name='slug' value='".htmlspecialchars($formData['slug'] ?? '')."' required>";
@@ -3228,7 +3326,6 @@ HTML;
                 echo "</div>";
             }
             echo "</div>";
-
             echo "<div style='display:flex; gap:20px; flex-wrap:wrap;'>";
             echo "<textarea id='editor-textarea' name='body' style='flex:1; min-width:300px; height:500px; font-family:monospace;' required>".htmlspecialchars($formData['body'])."</textarea>";
             
@@ -3239,7 +3336,6 @@ HTML;
                 echo "</div>";
             }
             echo "</div></fieldset>";
-
             $cancelUrl = $isPage ? "{$baseUrl}cms/pages" : "{$baseUrl}cms/blogs_admin";
             echo "<button type='submit' class='btn' style='margin-right:10px;'>保存する</button> <a href='{$cancelUrl}' class='btn' style='background:#6c757d;'>キャンセル</a></form>";
             
@@ -3269,7 +3365,6 @@ document.addEventListener('DOMContentLoaded', () => {
     editForm.addEventListener('submit', () => {
         isDirty = false; // 保存時はアラートを出さない
     });
-
     if (preview && toggle) {
         const updatePreview = () => {
             if (!toggle.checked) return;
@@ -3290,21 +3385,18 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     }
-
     const insertText = (text, prefix = '', suffix = '') => {
         const start = editor.selectionStart;
         const end = editor.selectionEnd;
         const textBefore = editor.value.substring(0, start);
         const textAfter = editor.value.substring(end, editor.value.length);
         const selected = editor.value.substring(start, end);
-
         let inserted = '';
         if (prefix || suffix) {
             inserted = prefix + selected + suffix;
         } else {
             inserted = text;
         }
-
         editor.value = textBefore + inserted + textAfter;
         editor.selectionStart = start + prefix.length + (selected ? selected.length : text.length);
         editor.selectionEnd = editor.selectionStart;
@@ -3315,11 +3407,9 @@ document.addEventListener('DOMContentLoaded', () => {
             editor.dispatchEvent(new Event('input'));
         }
     };
-
     document.querySelectorAll('.md-btn').forEach(btn => {
         btn.addEventListener('click', () => insertText('', btn.dataset.prefix, btn.dataset.suffix));
     });
-
     document.querySelectorAll('.var-btn').forEach(btn => {
         btn.addEventListener('click', () => insertText(btn.dataset.var));
     });
@@ -3329,7 +3419,6 @@ document.addEventListener('DOMContentLoaded', () => {
 JS;
             return;
         }
-
         // ==========================================
         // 4. キャッチオール：静的サイト風の通常ページ出力
         // ==========================================
@@ -3355,7 +3444,6 @@ JS;
             echo $this->replaceVariables($footer, $baseUrl);
             return;
         }
-
         $this->renderErrorPage(404, $baseUrl, "お探しのページは見つかりませんでした。");
     }
 }
