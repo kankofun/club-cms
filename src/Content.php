@@ -31,11 +31,15 @@ class Content {
                         'title' => $content['title'],
                         'slug' => $content['slug'] ?? '',
                         'type' => $content['type'],
+                        'status' => $content['status'] ?? 'published',
+                        'thumbnail' => $content['thumbnail'] ?? '',
                         'created_at' => $content['created_at'] ?? '',
                         'updated_at' => $content['updated_at'] ?? '',
                         'author_id' => $content['author_id'] ?? null,
                         'category_id' => $content['category_id'] ?? null,
-                        'tags' => $content['tags'] ?? []
+                        'tags' => $content['tags'] ?? [],
+                        'edit_requests' => $content['edit_requests'] ?? [],
+                        'allowed_editors' => $content['allowed_editors'] ?? []
                     ];
                 }
             }
@@ -62,7 +66,6 @@ class Content {
         return $this->db->read(self::DIR . $id . '.json', null);
     }
 
-    // ★ リビジョンの一覧取得
     public function getRevisions($id) {
         $revisions = [];
         $revDir = DATA_DIR . '/' . self::REV_DIR;
@@ -78,7 +81,6 @@ class Content {
         return $revisions;
     }
 
-    // ★ 特定のリビジョンの取得
     public function getRevision($id, $version) {
         return $this->db->read(self::REV_DIR . $id . '_v' . $version . '.json', null);
     }
@@ -121,11 +123,15 @@ class Content {
             'title' => $data['title'],
             'slug' => $data['slug'],
             'type' => $data['type'],
+            'status' => $data['status'] ?? 'published',
+            'thumbnail' => $data['thumbnail'] ?? '',
             'created_at' => $data['created_at'],
             'updated_at' => $data['updated_at'],
             'author_id' => $data['author_id'] ?? null,
             'category_id' => $data['category_id'] ?? null,
-            'tags' => $data['tags'] ?? []
+            'tags' => $data['tags'] ?? [],
+            'edit_requests' => $data['edit_requests'] ?? [],
+            'allowed_editors' => $data['allowed_editors'] ?? []
         ];
 
         $found = false;
