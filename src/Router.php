@@ -2847,7 +2847,6 @@ HTML;
             $order = $_GET['order'] ?? 'desc';
             $p = max(1, (int)($_GET['p'] ?? 1));
 
-            // ★ 検索時に限りフルデータを取得する (Warning回避)
             $blogs = array_filter($q !== '' ? $this->contentModel->getAllFull() : $this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
             $categories = $this->contentModel->getCategories();
             
@@ -2858,7 +2857,8 @@ HTML;
             if ($q !== '') {
                 $blogs = array_filter($blogs, function($b) use ($q, $userMap) {
                     $authorName = $userMap[$b['author_id'] ?? ''] ?? '不明';
-                    $target = $b['title'] . ' ' . ($b['body'] ?? '') . ' ' . $authorName;
+                    $bodyText = isset($b['body']) ? $b['body'] : '';
+                    $target = $b['title'] . ' ' . $bodyText . ' ' . $authorName;
                     return mb_stripos($target, $q) !== false;
                 });
             }
@@ -2897,7 +2897,7 @@ HTML;
             echo "</form>";
 
             echo "<div style='font-size:0.9em; color:#666; margin-bottom:10px;'>全 {$total} 件中 ".(($p-1)*$perPage+1)." - ".min($total, $p*$perPage)." 件を表示</div>";
-            echo "<table><thead><tr><th>タイトル</th><th>作成者</th><th>作成日時 / 更新日時</th><th>カテゴリ / タグ</th><th>操作</th></tr></thead><tbody>";
+            echo "<table><thead><tr><th>状態</th><th>タイトル</th><th>作成者</th><th>作成日時 / 更新日時</th><th>カテゴリ / タグ</th><th>操作</th></tr></thead><tbody>";
             foreach ($pagedBlogs as $b) {
                 $cName = '-';
                 if (!empty($b['category_id'])) {
@@ -2909,10 +2909,12 @@ HTML;
                 $cDate = date('Y-m-d H:i', strtotime($b['created_at'] ?? 'now'));
                 $uDate = date('Y-m-d H:i', strtotime($b['updated_at'] ?? 'now'));
 
-                $statusLabel = ($b['status'] ?? 'published') === 'draft' ? '<span style="color:red; font-size:0.85em; font-weight:bold;">[下書き]</span> ' : '';
+                $isDraft = ($b['status'] ?? 'published') === 'draft';
+                $statusLabel = $isDraft ? "<span style='color:#dc3545; font-weight:bold;'>下書き</span>" : "<span style='color:#28a745;'>公開中</span>";
 
                 echo "<tr>";
-                echo "<td>{$statusLabel}<a href='{$baseUrl}blog/" . htmlspecialchars($b['slug'] ?? '') . "' target='_blank' style='font-weight:bold;text-decoration:none;color:#0056b3;'>" . htmlspecialchars($b['title']) . " ↗</a></td>";
+                echo "<td>{$statusLabel}</td>";
+                echo "<td><a href='{$baseUrl}blog/" . htmlspecialchars($b['slug'] ?? '') . "' target='_blank' style='font-weight:bold;text-decoration:none;color:#0056b3;'>" . htmlspecialchars($b['title']) . " ↗</a></td>";
                 echo "<td>" . htmlspecialchars($authorName) . "</td>";
                 echo "<td style='font-size:0.9em;'>作: {$cDate}<br>更: {$uDate}</td>";
                 echo "<td style='font-size:0.9em;'>カ: ".htmlspecialchars($cName)."<br>タ: ".htmlspecialchars($tags)."</td>";
@@ -2939,7 +2941,7 @@ HTML;
                 }
                 echo "</td></tr>";
             }
-            if (empty($pagedBlogs)) echo "<tr><td colspan='5'>記事が見つかりません。</td></tr>";
+            if (empty($pagedBlogs)) echo "<tr><td colspan='6'>記事が見つかりません。</td></tr>";
             echo "</tbody></table>";
 
             if ($maxPage > 1) {
@@ -3161,7 +3163,17 @@ HTML;
                 }
 
                 if ($isAdminOrSpecial && !$isPage) {
-                    $allowed = isset($formData['allowed_editors_str']) ? array_filter(array_map('trim', explode(',', $formData['allowed_editors_str']))) : ($existingData['allowed_editors'] ?? []);
+                    $allowed = $existingData['allowed_editors'] ?? [];
+                    if (isset($formData['allowed_editors_str'])) {
+                        $inputSids = array_filter(array_map('trim', explode(',', $formData['allowed_editors_str'])));
+                        $newAllowed = [];
+                        foreach ($inputSids as $sid) {
+                            $u = $this->userModel->findByStudentId($sid);
+                            if ($u) $newAllowed[] = $u['id'];
+                        }
+                        $allowed = $newAllowed;
+                    }
+                    
                     if (isset($_POST['approve_requests']) && is_array($_POST['approve_requests'])) {
                         foreach ($_POST['approve_requests'] as $appId) {
                             if (!in_array($appId, $allowed)) $allowed[] = $appId;
@@ -3320,6 +3332,9 @@ HTML;
                 if ($isAdminOrSpecial) echo "<label>URLスラッグ (任意)</label><input type='text' name='slug' value='".htmlspecialchars($formData['slug'] ?? '')."'>";
                 else echo "<input type='hidden' name='slug' value='".htmlspecialchars($formData['slug'] ?? '')."'>";
 
+                $reqThumb = !empty($settings['blog_thumbnail_required']) ? " <span style='color:red;'>*</span>" : "";
+                echo "<label>サムネイル画像URL{$reqThumb}</label><input type='text' name='thumbnail' value='".htmlspecialchars($formData['thumbnail'] ?? '')."' placeholder='{$baseUrl}uploads/xxx.png' ".(trim($reqThumb) ? 'required' : '').">";
+
                 if (!empty($settings['blog_category_enabled'])) {
                     $cats = $this->contentModel->getCategories();
                     $req = !empty($settings['blog_category_required']) ? 'required' : '';
@@ -3343,19 +3358,31 @@ HTML;
             if ($isAdminOrSpecial && !$isPage && ($settings['blog_edit_policy'] ?? '') === 'allowed_only') {
                 echo "<fieldset><legend>編集権限設定 (許可された記事のみ設定時)</legend>";
                 $requests = $formData['edit_requests'] ?? [];
+                
+                $users = $this->userModel->getAll();
+                $userMap = []; 
+                $studentIdMap = [];
+                foreach($users as $u) { 
+                    $userMap[$u['id']] = $u['name']; 
+                    $studentIdMap[$u['id']] = $u['student_id'];
+                }
+                
                 if (!empty($requests)) {
                     echo "<p><strong>編集リクエスト:</strong></p><ul style='list-style:none; padding-left:0;'>";
-                    $users = $this->userModel->getAll();
-                    $userMap = []; foreach($users as $u) $userMap[$u['id']] = $u['name'];
                     foreach ($requests as $reqUserId) {
                         $name = $userMap[$reqUserId] ?? $reqUserId;
                         echo "<li><label><input type='checkbox' name='approve_requests[]' value='".htmlspecialchars($reqUserId)."'> " . htmlspecialchars($name) . " の編集を許可する</label></li>";
                     }
                     echo "</ul>";
                 }
+                
                 $allowed = $formData['allowed_editors'] ?? [];
-                echo "<label>現在許可されているユーザー (IDカンマ区切り):</label>";
-                echo "<input type='text' name='allowed_editors_str' value='".htmlspecialchars(implode(',', $allowed))."'>";
+                $allowedSids = [];
+                foreach ($allowed as $aid) {
+                    if (isset($studentIdMap[$aid])) $allowedSids[] = $studentIdMap[$aid];
+                }
+                echo "<label>現在許可されているユーザー (ログインID[学籍番号]をカンマ区切りで入力):</label>";
+                echo "<input type='text' name='allowed_editors_str' value='".htmlspecialchars(implode(', ', $allowedSids))."' placeholder='例: 2024001, 2024002'>";
                 echo "</fieldset>";
             }
 
