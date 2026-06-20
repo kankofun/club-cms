@@ -20,8 +20,9 @@ class Router {
         $logFile = __DIR__ . '/../data/app.log';
         if (!file_exists(dirname($logFile))) @mkdir(dirname($logFile), 0777, true);
         $date = date('Y-m-d H:i:s');
+        $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
         $userName = $user ? $user['name'] . ' (' . $user['student_id'] . ')' : 'System/Guest';
-        $line = "$date\t$userName\t$action\t$details\n";
+        $line = "$date\t$ip\t$userName\t$action\t$details\n";
         @file_put_contents($logFile, $line, FILE_APPEND | LOCK_EX);
 
         $settings = $this->getSettings();
@@ -69,15 +70,100 @@ class Router {
         @file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
     }
 
-    private function renderBlogItem($blog, $baseUrl, $settings, $categories) {
+    private function getRoles() {
+        $file = __DIR__ . '/../data/roles.json';
+        if (!file_exists($file)) {
+            // デフォルトロール（admin は全権限・保護）
+            $default = [
+                [
+                    'name' => 'admin',
+                    'protected' => true,
+                    'permissions' => [
+                        'blogs_view','blogs_create','blogs_edit_all','blogs_delete',
+                        'blogs_edit_request','blogs_draft','blogs_revisions',
+                        'pages_manage',
+                        'files_upload','files_upload_unrestricted','files_delete_any',
+                        'users_view','users_create','users_edit','users_delete',
+                        'users_csv_import','users_role_change',
+                        'settings_mail','settings_2fa','settings_site',
+                        'logs_view','backups_manage',
+                        'roles_manage',
+                        'assets_manage',
+                        'categories_manage','templates_manage'
+                    ]
+                ],
+                [
+                    'name' => 'special',
+                    'protected' => true,
+                    'permissions' => [
+                        'blogs_view','blogs_create','blogs_edit_all','blogs_delete',
+                        'blogs_edit_request','blogs_draft','blogs_revisions',
+                        'pages_manage',
+                        'files_upload','files_upload_unrestricted','files_delete_any',
+                        'categories_manage','templates_manage'
+                    ]
+                ],
+                [
+                    'name' => 'general',
+                    'protected' => true,
+                    'permissions' => [
+                        'blogs_view','blogs_create',
+                        'blogs_draft','blogs_revisions',
+                        'files_upload'
+                    ]
+                ]
+            ];
+            @file_put_contents($file, json_encode($default, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+            return $default;
+        }
+        $roles = json_decode(file_get_contents($file), true);
+        if (!$roles) $roles = [];
+        // 後方互換：既存の古い権限定義を新しいものに変換（省略可だが、ここでは実装しない）
+        return $roles;
+    }
+
+    private function saveRoles($roles) {
+        $file = __DIR__ . '/../data/roles.json';
+        @file_put_contents($file, json_encode($roles, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    }
+
+    private function userHasPermission($user, $permission) {
+        if (!$user) return false;
+        $roles = $this->getRoles();
+        $roleName = $user['role'] ?? 'general';
+        foreach ($roles as $r) {
+            if ($r['name'] === $roleName) {
+                return in_array($permission, $r['permissions'] ?? []);
+            }
+        }
+        return false;
+    }
+
+    private function rememberBlogIndexUrl($url) {
+        if (is_string($url) && $url !== '') {
+            $_SESSION['blog_index_url'] = $url;
+        }
+    }
+
+    private function getBlogIndexUrl($baseUrl) {
+        if (!empty($_SESSION['blog_index_url']) && is_string($_SESSION['blog_index_url'])) {
+            return $_SESSION['blog_index_url'];
+        }
+        return rtrim($baseUrl, '/') . '/blogs';
+    }
+
+    private function renderBlogItem($blog, $baseUrl, $settings, $categories, $blogIndexUrl = null) {
         $mode = $settings['blog_list_mode'] ?? 'list';
         $dateField = $settings['blog_date_type'] ?? 'updated_at';
         $bDate = !empty($blog[$dateField]) ? $blog[$dateField] : ($blog['updated_at'] ?? 'now');
         $dateStr = date('Y.m.d', strtotime($bDate));
         
-        $url = "{$baseUrl}blog/" . htmlspecialchars($blog['slug'] ?? '');
+        $url = "{$baseUrl}blog/" . urlencode($blog['slug'] ?? '');
         $title = htmlspecialchars($blog['title']);
         $thumbnail = !empty($blog['thumbnail']) ? htmlspecialchars($blog['thumbnail']) : htmlspecialchars($settings['blog_default_thumbnail'] ?? "{$baseUrl}assets/default.png");
+        
+        $blogIndexUrl = $blogIndexUrl ?: $this->getBlogIndexUrl($baseUrl);
+        $safeBlogIndexUrl = htmlspecialchars($blogIndexUrl, ENT_QUOTES, 'UTF-8');
         
         $cName = '';
         $catHtml = '';
@@ -86,7 +172,7 @@ class Router {
                 if($c['id'] === $blog['category_id']) {
                     $cName = htmlspecialchars($c['name']);
                     $color = !empty($c['color']) ? $c['color'] : '#007bff';
-                    $catHtml = "<span style='background:{$color}; color:#fff; padding:2px 6px; border-radius:3px; font-size:0.8em; margin-right:10px;'><a href='{$baseUrl}blogs?category={$c['id']}' style='color:#fff;text-decoration:none;'>{$cName}</a></span>";
+                    $catHtml = "<span style='background:{$color}; color:#fff; padding:2px 6px; border-radius:3px; font-size:0.8em; margin-right:10px;'><a href='{$safeBlogIndexUrl}?category=" . urlencode($c['id']) . "' style='color:#fff;text-decoration:none;'>{$cName}</a></span>";
                     break;
                 }
             }
@@ -96,7 +182,7 @@ class Router {
         if (!empty($settings['blog_tag_enabled']) && !empty($blog['tags'])) {
             $tagsHtml .= "<div class='blog-item-tags' style='margin-top:8px; font-size:0.85em; color:#666;'>";
             foreach ($blog['tags'] as $t) {
-                $tagsHtml .= "<a href='{$baseUrl}blogs?tag=".urlencode($t)."' style='display:inline-block; background:#e2e3e5; padding:2px 8px; border-radius:10px; text-decoration:none; color:#333; margin-right:5px;'>#".htmlspecialchars($t)."</a>";
+                $tagsHtml .= "<a href='{$safeBlogIndexUrl}?tag=".urlencode($t)."' style='display:inline-block; background:#e2e3e5; padding:2px 8px; border-radius:10px; text-decoration:none; color:#333; margin-right:5px;'>#".htmlspecialchars($t)."</a>";
             }
             $tagsHtml .= "</div>";
         }
@@ -117,7 +203,7 @@ class Router {
         $categories = $this->contentModel->getCategories();
         
         $currentUrlPath = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
-        $actionUrl = htmlspecialchars($currentUrlPath);
+        $actionUrl = htmlspecialchars($currentUrlPath, ENT_QUOTES, 'UTF-8');
 
         $rawVars = $settings['variables'] ?? '';
         $lines = explode("\n", $rawVars);
@@ -175,7 +261,7 @@ class Router {
             $html = "<ul class='blog-archives-list' style='list-style:none; padding:0;'>";
             foreach ($archives as $m => $cnt) {
                 $mName = date('Y年n月', strtotime($m . '-01'));
-                $html .= "<li style='margin-bottom:5px;'><a href='{$actionUrl}?month={$m}'>{$mName} ({$cnt})</a></li>";
+                $html .= "<li style='margin-bottom:5px;'><a href='{$actionUrl}?month=".urlencode($m)."'>{$mName} ({$cnt})</a></li>";
             }
             $html .= "</ul>";
             $text = str_replace('{{blog_archives}}', $html, $text);
@@ -185,6 +271,8 @@ class Router {
         $text = preg_replace('/\{\{latest_blogs_(\d+)\}\}/', '{{blogs limit=$1}}', $text);
 
         if (strpos($text, '{{blog_main_list}}') !== false) {
+            $this->rememberBlogIndexUrl($currentUrlPath);
+
             $q = trim($_GET['q'] ?? '');
             $catId = trim($_GET['category'] ?? '');
             $tag = trim($_GET['tag'] ?? '');
@@ -270,7 +358,7 @@ class Router {
                 $isCard = ($settings['blog_list_mode'] ?? 'list') === 'card';
                 $html .= $isCard ? "<div class='blog-card-grid' style='display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:20px;'>" : "<ul class='latest-blogs' style='list-style:none; padding:0;'>";
                 foreach ($pagedBlogs as $blog) {
-                    $html .= $this->renderBlogItem($blog, $baseUrl, $settings, $categories);
+                    $html .= $this->renderBlogItem($blog, $baseUrl, $settings, $categories, $currentUrlPath);
                 }
                 $html .= $isCard ? "</div>" : "</ul>";
 
@@ -287,7 +375,7 @@ class Router {
             $text = str_replace('{{blog_main_list}}', $html, $text);
         }
 
-        $text = preg_replace_callback('/\{\{blogs\s*(.*?)\}\}/', function($m) use ($baseUrl, $settings, $dateField, $categories, $actionUrl) {
+        $text = preg_replace_callback('/\{\{blogs\s*(.*?)\}\}/', function($m) use ($baseUrl, $settings, $dateField, $categories, $actionUrl, $currentUrlPath) {
             $attrStr = trim($m[1]);
             $args = [];
             if (preg_match_all('/(\w+)=([^\s]+)/', $attrStr, $matches, PREG_SET_ORDER)) {
@@ -328,7 +416,7 @@ class Router {
             $isCard = ($settings['blog_list_mode'] ?? 'list') === 'card';
             $html = $isCard ? "<div class='blog-card-grid' style='display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:20px;'>" : "<ul class='latest-blogs' style='list-style:none; padding:0;'>";
             foreach ($pagedBlogs as $blog) {
-                $html .= $this->renderBlogItem($blog, $baseUrl, $settings, $categories);
+                $html .= $this->renderBlogItem($blog, $baseUrl, $settings, $categories, $currentUrlPath);
             }
             $html .= $isCard ? "</div>" : "</ul>";
 
@@ -440,7 +528,7 @@ class Router {
         header("Location: " . $redirect); exit;
     }
 
-    private function getAdminHead($baseUrl, $currentUser, $isAdminOrSpecial) {
+        private function getAdminHead($baseUrl, $currentUser, $isAdminOrSpecial) {
         $head = <<<HTML
 <!DOCTYPE html>
 <html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>CMS管理画面</title>
@@ -467,32 +555,32 @@ class Router {
     .alert-error { background: #f8d7da; color: #721c24; border-color: #f5c6cb; }
 </style></head><body>
 <aside class="sidebar" aria-label="管理メニュー"><h2>CMS Menu</h2><nav><ul>
-    <li><a href="{$baseUrl}cms/dashboard">ダッシュボード</a></li>
 HTML;
-        if ($isAdminOrSpecial) {
-            $head .= "<li><a href='{$baseUrl}cms/pages'>通常ページ管理</a></li>";
+        $menuItems = [
+            ['url' => 'cms/dashboard',       'label' => 'ダッシュボード',          'perm' => null],
+            ['url' => 'cms/pages',           'label' => '通常ページ管理',          'perm' => 'pages_manage'],
+            ['url' => 'cms/blogs_admin',     'label' => 'ブログ記事管理',          'perm' => 'blogs_view'],
+            ['url' => 'cms/uploads',         'label' => 'メディア(ファイル)管理',  'perm' => 'files_upload'],
+            ['url' => 'cms/categories',      'label' => 'カテゴリ管理',            'perm' => 'categories_manage'],
+            ['url' => 'cms/templates',       'label' => 'システム設定・デザイン',  'perm' => 'settings_site'],
+            ['url' => 'cms/users',           'label' => 'ユーザー管理',            'perm' => 'users_view'],
+            ['url' => 'cms/settings/mail',   'label' => 'メール送信設定',          'perm' => 'settings_mail'],
+            ['url' => 'cms/settings/2fa',    'label' => '二段階認証(2FA)設定',     'perm' => 'settings_2fa'],
+            ['url' => 'cms/backups',         'label' => '復元と入出力',            'perm' => 'backups_manage'],
+            ['url' => 'cms/logs',            'label' => 'システムログ',            'perm' => 'logs_view'],
+            ['url' => 'cms/roles',           'label' => '権限管理',                'perm' => 'roles_manage'],
+            ['url' => 'cms/assets',          'label' => 'アセット管理',            'perm' => 'assets_manage'],
+            ['url' => 'cms/profile',         'label' => 'プロフィール設定',        'perm' => null],
+            ['url' => 'cms/2fa',             'label' => 'マイTOTP設定',            'perm' => null],
+        ];
+        foreach ($menuItems as $item) {
+            if ($item['perm'] === null || $this->userHasPermission($currentUser, $item['perm'])) {
+                $head .= "<li><a href='{$baseUrl}{$item['url']}'>{$item['label']}</a></li>";
+            }
         }
-        $head .= "<li><a href='{$baseUrl}cms/blogs_admin'>ブログ記事管理</a></li>";
-        $head .= "<li><a href='{$baseUrl}cms/uploads'>メディア(ファイル)管理</a></li>";
-        
-        if ($isAdminOrSpecial) {
-            $head .= "<li><a href='{$baseUrl}cms/categories'>カテゴリ管理</a></li>";
-            $head .= "<li><a href='{$baseUrl}cms/templates'>システム設定・デザイン</a></li>";
-        }
-        if ($currentUser['role'] === 'admin') {
-            $head .= "<li><a href='{$baseUrl}cms/users'>ユーザー管理</a></li>";
-            $head .= "<li><a href='{$baseUrl}cms/settings/mail'>メール送信設定</a></li>";
-            $head .= "<li><a href='{$baseUrl}cms/settings/2fa'>二段階認証(2FA)設定</a></li>";
-            $head .= "<li><a href='{$baseUrl}cms/backups'>復元と入出力</a></li>";
-            $head .= "<li><a href='{$baseUrl}cms/logs'>システムログ</a></li>";
-        }
-        $head .= <<<HTML
-    <li><a href="{$baseUrl}cms/profile">プロフィール設定</a></li>
-    <li><a href="{$baseUrl}cms/2fa">マイTOTP設定</a></li>
-    <li><a href="{$baseUrl}" target="_blank">サイトを確認 ↗</a></li>
-    <li><a href="{$baseUrl}cms/logout">ログアウト</a></li>
-</ul></nav></aside><main class="main-content">
-HTML;
+        $head .= "<li><a href='{$baseUrl}' target='_blank'>サイトを確認 ↗</a></li>";
+        $head .= "<li><a href='{$baseUrl}cms/logout'>ログアウト</a></li>";
+        $head .= "</ul></nav></aside><main class=\"main-content\">";
         
         $flashMsg = $_SESSION['flash_message'] ?? '';
         $flashErr = $_SESSION['flash_error'] ?? '';
@@ -567,9 +655,30 @@ HTML;
             }
         }
 
-        if ($path === 'assets/style.css') {
-            header('Content-Type: text/css; charset=utf-8');
-            echo $this->replaceVariables($this->templateModel->get('style.css'), $baseUrl); return;
+        if (preg_match('#^assets/(.+)$#', $cleanPath, $matches)) {
+            $filename = basename($matches[1]);
+            // テンプレートCSSは後方互換のため優先
+            if ($filename === 'style.css' && $this->templateModel->get('style.css')) {
+                header('Content-Type: text/css; charset=utf-8');
+                echo $this->replaceVariables($this->templateModel->get('style.css'), $baseUrl);
+                return;
+            }
+            $filepath = __DIR__ . '/../data/assets/' . $filename;
+            if (file_exists($filepath)) {
+                $ext = strtolower(pathinfo($filepath, PATHINFO_EXTENSION));
+                $mimes = [
+                    'jpg'=>'image/jpeg', 'jpeg'=>'image/jpeg', 'png'=>'image/png', 'gif'=>'image/gif',
+                    'webp'=>'image/webp', 'svg'=>'image/svg+xml', 'css'=>'text/css', 'js'=>'application/javascript',
+                    'woff'=>'font/woff', 'woff2'=>'font/woff2', 'ttf'=>'font/ttf', 'eot'=>'application/vnd.ms-fontobject',
+                    'json'=>'application/json', 'pdf'=>'application/pdf', 'zip'=>'application/zip'
+                ];
+                $mime = $mimes[$ext] ?? 'application/octet-stream';
+                header("Content-Type: $mime");
+                header("Content-Length: " . filesize($filepath));
+                readfile($filepath);
+                return;
+            }
+            $this->renderErrorPage(404, $baseUrl, "アセットが見つかりません。");
         }
 
         // ==========================================
@@ -824,22 +933,24 @@ HTML;
             $realUpdated = date('Y.m.d H:i', strtotime($article['updated_at'] ?? 'now'));
             $upText = ($cDate !== $realUpdated && $dateField === 'created_at') ? "<span style='margin-left:10px;'>(更新日: <time datetime='".htmlspecialchars($article['updated_at'])."'>{$realUpdated}</time>)</span>" : "";
 
+            $blogIndexUrl = htmlspecialchars($this->getBlogIndexUrl($baseUrl), ENT_QUOTES, 'UTF-8');
+
             $catHtml = '';
             if (!empty($settings['blog_category_enabled']) && !empty($article['category_id'])) {
                 $categories = $this->contentModel->getCategories();
                 foreach($categories as $c) {
                     if($c['id'] === $article['category_id']) {
                         $color = !empty($c['color']) ? $c['color'] : '#007bff';
-                        $catHtml = "<span style='background:{$color}; color:#fff; padding:2px 6px; border-radius:3px; font-size:0.8em; margin-left:10px;'><a href='{$baseUrl}blogs?category={$c['id']}' style='color:#fff;text-decoration:none;'>".htmlspecialchars($c['name'])."</a></span>";
+                        $catHtml = "<span style='background:{$color}; color:#fff; padding:2px 6px; border-radius:3px; font-size:0.8em; margin-left:10px;'><a href='{$blogIndexUrl}?category=" . urlencode($c['id']) . "' style='color:#fff;text-decoration:none;'>".htmlspecialchars($c['name'])."</a></span>";
                         break;
                     }
                 }
             }
-            
+
             $tagsHtml = '';
             if (!empty($settings['blog_tag_enabled']) && !empty($article['tags'])) {
                 foreach ($article['tags'] as $t) {
-                    $tagsHtml .= " <a href='{$baseUrl}blogs?tag=".urlencode($t)."' style='display:inline-block; background:#e2e3e5; padding:2px 8px; border-radius:10px; text-decoration:none; color:#333; margin-left:5px; font-size:0.9em;'>#".htmlspecialchars($t)."</a>";
+                    $tagsHtml .= " <a href='{$blogIndexUrl}?tag=".urlencode($t)."' style='display:inline-block; background:#e2e3e5; padding:2px 8px; border-radius:10px; text-decoration:none; color:#333; margin-left:5px; font-size:0.9em;'>#".htmlspecialchars($t)."</a>";
                 }
             }
 
@@ -850,7 +961,7 @@ HTML;
 
             if ($prev) {
                 $blogLayout = preg_replace('/\{\{if_prev\}\}(.*?)\{\{\/if_prev\}\}/is', '$1', $blogLayout);
-                $blogLayout = str_replace('{{prev_url}}', "{$baseUrl}blog/".htmlspecialchars($prev['slug']), $blogLayout);
+                $blogLayout = str_replace('{{prev_url}}', "{$baseUrl}blog/".urlencode($prev['slug']), $blogLayout);
                 $blogLayout = str_replace('{{prev_title}}', htmlspecialchars($prev['title']), $blogLayout);
             } else {
                 $blogLayout = preg_replace('/\{\{if_prev\}\}(.*?)\{\{\/if_prev\}\}/is', '', $blogLayout);
@@ -858,7 +969,7 @@ HTML;
 
             if ($next) {
                 $blogLayout = preg_replace('/\{\{if_next\}\}(.*?)\{\{\/if_next\}\}/is', '$1', $blogLayout);
-                $blogLayout = str_replace('{{next_url}}', "{$baseUrl}blog/".htmlspecialchars($next['slug']), $blogLayout);
+                $blogLayout = str_replace('{{next_url}}', "{$baseUrl}blog/".urlencode($next['slug']), $blogLayout);
                 $blogLayout = str_replace('{{next_title}}', htmlspecialchars($next['title']), $blogLayout);
             } else {
                 $blogLayout = preg_replace('/\{\{if_next\}\}(.*?)\{\{\/if_next\}\}/is', '', $blogLayout);
@@ -1175,24 +1286,55 @@ HTML;
 
         // ★ 全てのシステム画面で権限チェックを行い、権限がなければ403エラー画面を表示
         if ($isSystemPath && strpos($path, 'cms/login') !== 0 && $path !== 'cms/logout' && $path !== 'cms/dashboard' && strpos($path, 'cms/profile') !== 0 && strpos($path, 'cms/2fa') !== 0) {
-            $adminOnly = ['cms/settings/mail', 'cms/settings/2fa', 'cms/settings/2fa/manage', 'cms/settings/2fa/backup', 'cms/logs', 'cms/logs/download', 'cms/backups', 'cms/backups/export', 'cms/backups/import', 'cms/users', 'cms/users/edit', 'cms/users/csv_upload', 'cms/users/csv_map'];
-            $specialOnly = ['cms/pages', 'cms/categories', 'cms/templates'];
-            
-            if (in_array($path, $adminOnly) && $currentUser['role'] !== 'admin') {
-                $this->renderErrorPage(403, $baseUrl, "権限がありません。", $adminHead);
-            }
-            if (in_array($path, $specialOnly) && !$isAdminOrSpecial) {
-                $this->renderErrorPage(403, $baseUrl, "権限がありません。", $adminHead);
+            $permissionMap = [
+                'cms/settings/mail' => 'settings_mail',
+                'cms/settings/2fa' => 'settings_2fa',
+                'cms/settings/2fa/manage' => 'settings_2fa',
+                'cms/settings/2fa/backup' => 'settings_2fa',
+                'cms/logs' => 'logs_view',
+                'cms/logs/download' => 'logs_view',
+                'cms/backups' => 'backups_manage',
+                'cms/backups/export' => 'backups_manage',
+                'cms/backups/import' => 'backups_manage',
+                'cms/users' => 'users_view',
+                'cms/users/edit' => 'users_edit',
+                'cms/users/csv_upload' => 'users_csv_import',
+                'cms/users/csv_map' => 'users_csv_import',
+                'cms/pages' => 'pages_manage',
+                'cms/categories' => 'categories_manage',
+                'cms/templates' => 'templates_manage',
+                'cms/roles' => 'roles_manage',
+                'cms/roles/edit' => 'roles_manage',
+                'cms/assets' => 'assets_manage',
+                'cms/blogs_admin' => 'blogs_view',
+                'cms/contents/delete' => null, // POSTで個別にチェック
+                'cms/contents/edit' => null,   // GET/POSTで個別にチェック
+                'cms/contents/request_edit' => null,
+                'cms/contents/revisions' => null,
+                'cms/contents/restore' => null,
+            ];
+            if (isset($permissionMap[$path]) && $permissionMap[$path] !== null) {
+                $required = $permissionMap[$path];
+                if (!$this->userHasPermission($currentUser, $required)) {
+                    $this->writeLog($currentUser, 'Access Denied', "Attempted to access {$path} without permission {$required}");
+                    $this->renderErrorPage(403, $baseUrl, "権限がありません。", $adminHead);
+                }
             }
         }
 
         if ($path === 'cms/dashboard') {
-            $roles = ['admin' => '管理者', 'special' => '特別部員', 'general' => '一般部員'];
-            $roleLabel = $roles[$currentUser['role']] ?? '不明';
+            $roles = $this->getRoles();
+            $roleLabel = '不明';
+            foreach ($roles as $r) {
+                if ($r['name'] === $currentUser['role']) {
+                    $roleLabel = $r['name'];
+                    break;
+                }
+            }
             echo $adminHead . "<h1>ダッシュボード</h1><p>ようこそ、" . htmlspecialchars($currentUser['name'] ?? '部員') . "さん。</p>";
             echo "<div class='alert' style='background:#e9ecef; border-color:#dee2e6; color:#333; max-width: 400px;'><strong>あなたの現在の権限:</strong> " . htmlspecialchars($roleLabel) . "</div>";
 
-            if ($isAdminOrSpecial) {
+            if ($this->userHasPermission($currentUser, 'blogs_edit_request')) {
                 $reqBlogs = [];
                 $allBlogs = array_filter($this->contentModel->getAll(), function($c) { return $c['type'] === 'blog'; });
                 foreach ($allBlogs as $b) {
@@ -1219,7 +1361,7 @@ HTML;
         // メディア・ファイルアップロード管理
         // ==========================================
         if ($path === 'cms/uploads') {
-            $canUpload = ($currentUser['role'] === 'admin' || !empty($settings['upload_allow_general']));
+            $canUpload = $this->userHasPermission($currentUser, 'files_upload');
 
             if ($method === 'POST') {
                 $action = $_POST['action'] ?? '';
@@ -1348,9 +1490,9 @@ HTML;
                 echo "<button type='button' id='btn-upload' class='btn'>アップロード実行</button>";
                 echo "</div>";
                 
-                if ($currentUser['role'] === 'admin') {
+                if ($this->userHasPermission($currentUser, 'files_upload_unrestricted')) {
                     echo "<div style='background:#fff3cd; padding:10px; border-radius:4px; font-size:0.9em; margin-bottom:10px;'>";
-                    echo "<label><input type='checkbox' id='bypass_restrictions'> 拡張子やサイズの制限を無視する (管理者のみ)</label><br>";
+                    echo "<label><input type='checkbox' id='bypass_restrictions'> 拡張子やサイズの制限を無視する</label><br>";
                     echo "<label><input type='checkbox' id='bypass_convert'> 画像のWebP変換・リサイズを行わず元のままアップロードする</label>";
                     echo "</div>";
                 }
@@ -1389,7 +1531,7 @@ HTML;
                 }
                 echo "</td>";
                 echo "<td>";
-                if ($currentUser['role'] === 'admin' || $u['user_id'] === $currentUser['id']) {
+                if ($this->userHasPermission($currentUser, 'files_delete_any') || $u['user_id'] === $currentUser['id']) {
                     echo "<form method='POST' style='margin:0;' onsubmit='return confirm(\"本当に削除しますか？記事などで使用中の場合リンク切れになります。\");'><input type='hidden' name='action' value='delete'><input type='hidden' name='id' value='{$u['id']}'><button type='submit' class='btn' style='background:#dc3545; padding:5px 10px; font-size:0.9em;'>削除</button></form>";
                 }
                 echo "</td>";
@@ -1526,9 +1668,64 @@ JS;
         }
 
         // ==========================================
+        // アセット（システムファイル）管理
+        // ==========================================
+        if ($path === 'cms/assets' && $this->userHasPermission($currentUser, 'assets_manage')) {
+            $assetsDir = __DIR__ . '/../data/assets/';
+            if (!is_dir($assetsDir)) @mkdir($assetsDir, 0777, true);
+
+            if ($method === 'POST') {
+                $action = $_POST['action'] ?? '';
+                if ($action === 'upload' && isset($_FILES['file'])) {
+                    $file = $_FILES['file'];
+                    $safeName = preg_replace('/[^a-zA-Z0-9_.-]/', '', basename($file['name']));
+                    if (!$safeName) $safeName = 'asset_' . time();
+                    if (move_uploaded_file($file['tmp_name'], $assetsDir . $safeName)) {
+                        $this->writeLog($currentUser, 'Asset Upload', "File: {$safeName}");
+                        $_SESSION['flash_message'] = "アセットをアップロードしました。";
+                    } else {
+                        $_SESSION['flash_error'] = "アップロードに失敗しました。";
+                    }
+                } elseif ($action === 'delete' && isset($_POST['filename'])) {
+                    $target = $assetsDir . basename($_POST['filename']);
+                    if (file_exists($target)) {
+                        unlink($target);
+                        $this->writeLog($currentUser, 'Asset Delete', "File: {$_POST['filename']}");
+                        $_SESSION['flash_message'] = "アセットを削除しました。";
+                    }
+                }
+                header("Location: {$baseUrl}cms/assets"); exit;
+            }
+
+            $files = array_diff(scandir($assetsDir), ['.', '..']);
+            echo $adminHead . "<h1>アセット管理</h1>";
+            echo "<fieldset><legend>アセットアップロード</legend>";
+            echo "<form method='POST' enctype='multipart/form-data'>";
+            echo "<input type='hidden' name='action' value='upload'>";
+            echo "<input type='file' name='file' required> ";
+            echo "<button type='submit' class='btn'>アップロード</button>";
+            echo "</form></fieldset>";
+
+            echo "<h2>登録済みアセット</h2><table><thead><tr><th>ファイル名</th><th>URL</th><th>操作</th></tr></thead><tbody>";
+            foreach ($files as $f) {
+                $url = "{$baseUrl}assets/" . $f;
+                echo "<tr><td>".htmlspecialchars($f)."</td>";
+                echo "<td><input type='text' value='{$url}' readonly onclick='this.select();document.execCommand(\"copy\")' style='width:300px;'></td>";
+                echo "<td><form method='POST' style='margin:0;' onsubmit='return confirm(\"削除しますか？\");'>";
+                echo "<input type='hidden' name='action' value='delete'>";
+                echo "<input type='hidden' name='filename' value='".htmlspecialchars($f)."'>";
+                echo "<button type='submit' class='btn' style='background:#dc3545; padding:4px 8px;'>削除</button>";
+                echo "</form></td></tr>";
+            }
+            if (empty($files)) echo "<tr><td colspan='3'>アセットはありません</td></tr>";
+            echo "</tbody></table></main></body></html>";
+            return;
+        }
+
+        // ==========================================
         // 管理機能（各種設定、マイTOTP設定など）
         // ==========================================
-        if ($path === 'cms/settings/mail' && $currentUser['role'] === 'admin') {
+        if ($path === 'cms/settings/mail' && $this->userHasPermission($currentUser, 'settings_mail')) {
             if ($method === 'POST') {
                 if (isset($_POST['action']) && $_POST['action'] === 'test_mail') {
                     $mailer = new Mailer($settings);
@@ -1580,7 +1777,7 @@ JS;
             return;
         }
 
-        if ($path === 'cms/settings/2fa' && $currentUser['role'] === 'admin') {
+        if ($path === 'cms/settings/2fa' && $this->userHasPermission($currentUser, 'settings_2fa')) {
             if ($method === 'POST') {
                 $err = '';
                 if (isset($_POST['action']) && $_POST['action'] === 'save_global') {
@@ -1671,7 +1868,7 @@ JS;
             return;
         }
 
-        if ($path === 'cms/settings/2fa/manage' && $currentUser['role'] === 'admin') {
+        if ($path === 'cms/settings/2fa/manage' && $this->userHasPermission($currentUser, 'settings_2fa')) {
             $id = $_GET['id'] ?? '';
             $targetUser = $this->userModel->findById($id);
             if (!$targetUser) $this->renderErrorPage(404, $baseUrl, "ユーザーが見つかりません。", $adminHead);
@@ -1715,7 +1912,7 @@ JS;
             return;
         }
 
-        if ($path === 'cms/settings/2fa/backup' && $currentUser['role'] === 'admin') {
+        if ($path === 'cms/settings/2fa/backup' && $this->userHasPermission($currentUser, 'settings_2fa')) {
             $codes = $_SESSION['flash_backup_codes'] ?? [];
             unset($_SESSION['flash_backup_codes']);
             echo $adminHead . "<h1>バックアップコード</h1>";
@@ -1878,7 +2075,7 @@ JS;
         // ==========================================
         // ログ出力 (管理者)
         // ==========================================
-        if ($path === 'cms/logs/download' && $currentUser['role'] === 'admin') {
+        if ($path === 'cms/logs/download' && $this->userHasPermission($currentUser, 'logs_view')) {
             $logFile = __DIR__ . '/../data/app.log';
             if (file_exists($logFile)) {
                 header('Content-Type: text/plain; charset=utf-8');
@@ -1888,7 +2085,7 @@ JS;
             $this->renderErrorPage(404, $baseUrl, "ログファイルが見つかりません。", $adminHead);
         }
 
-        if ($path === 'cms/logs' && $currentUser['role'] === 'admin') {
+        if ($path === 'cms/logs' && $this->userHasPermission($currentUser, 'logs_view')) {
             echo $adminHead . "<h1>システムログ</h1>";
             $logFile = __DIR__ . '/../data/app.log';
             $logs = file_exists($logFile) ? array_reverse(file($logFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES)) : [];
@@ -1906,7 +2103,7 @@ JS;
         // ==========================================
         // 全データバックアップ・復元 (管理者)
         // ==========================================
-        if ($path === 'cms/backups/export' && $currentUser['role'] === 'admin') {
+        if ($path === 'cms/backups/export' && $this->userHasPermission($currentUser, 'backups_manage')) {
             if ($method === 'POST') {
                 $zip = new ZipArchive();
                 $backupDir = DATA_DIR . '/backups';
@@ -1938,7 +2135,7 @@ JS;
             $this->renderErrorPage(500, $baseUrl, "ZIPエクスポートに失敗しました。", $adminHead);
         }
 
-        if ($path === 'cms/backups/import' && $currentUser['role'] === 'admin') {
+        if ($path === 'cms/backups/import' && $this->userHasPermission($currentUser, 'backups_manage')) {
             if ($method === 'POST' && isset($_FILES['import_file'])) {
                 $file = $_FILES['import_file'];
                 if ($file['error'] === UPLOAD_ERR_OK && strtolower(pathinfo($file['name'], PATHINFO_EXTENSION)) === 'zip') {
@@ -1956,7 +2153,7 @@ JS;
             $this->renderErrorPage(500, $baseUrl, "インポートに失敗しました。ZIPファイルが正しいか確認してください。", $adminHead);
         }
 
-        if ($path === 'cms/backups' && $currentUser['role'] === 'admin') {
+        if ($path === 'cms/backups' && $this->userHasPermission($currentUser, 'backups_manage')) {
             echo $adminHead . "<h1>復元と入出力</h1>";
             $backupDir = __DIR__ . '/../data/backups';
             if ($method === 'POST' && !empty($_POST['restore_file']) && !empty($_POST['original_file'])) {
@@ -2031,7 +2228,7 @@ JS;
         // ==========================================
         // ★ ユーザー管理 (ページネーション、全項目ソート、登録順)
         // ==========================================
-        if ($path === 'cms/users' && $currentUser['role'] === 'admin') {
+        if ($path === 'cms/users' && $this->userHasPermission($currentUser, 'users_view')) {
             $search = $_GET['search'] ?? '';
             $sort = $_GET['sort'] ?? 'registered';
             $order = $_GET['order'] ?? 'asc';
@@ -2044,12 +2241,22 @@ JS;
                     if ($targetId === $currentUser['id']) {
                         if ($action === 'delete') { $skipMsg[] = "ログイン中の自分自身は削除から除外されました。"; continue; }
                         if ($action === 'lock') { $skipMsg[] = "ログイン中の自分自身は一時停止できません。"; continue; }
-                        if (in_array($action, ['special', 'general'])) { $skipMsg[] = "自分自身の権限を降格させることはできません。"; continue; }
+                        // ロール変更の場合、自分自身の権限を降格させる可能性があるなら阻止
+                        $allRoleNames = array_column($this->getRoles(), 'name');
+                        if (in_array($action, $allRoleNames) && $action !== $currentUser['role']) {
+                            $skipMsg[] = "自分自身の権限を変更することはできません。";
+                            continue;
+                        }
                     }
-                    if ($action === 'delete') $this->userModel->delete($targetId);
-                    elseif (in_array($action, ['admin', 'special', 'general'])) { $u = $this->userModel->findById($targetId); if ($u) { $u['role'] = $action; $this->userModel->save($u); } }
-                    elseif ($action === 'lock') { $u = $this->userModel->findById($targetId); if ($u) { $u['is_locked'] = true; $this->userModel->save($u); } }
-                    elseif ($action === 'unlock') { $u = $this->userModel->findById($targetId); if ($u) { $u['is_locked'] = false; $this->userModel->save($u); } }
+                    if ($action === 'delete') {
+                        $this->userModel->delete($targetId);
+                    } elseif ($action === 'lock') {
+                        $u = $this->userModel->findById($targetId); if ($u) { $u['is_locked'] = true; $this->userModel->save($u); }
+                    } elseif ($action === 'unlock') {
+                        $u = $this->userModel->findById($targetId); if ($u) { $u['is_locked'] = false; $this->userModel->save($u); }
+                    } elseif (in_array($action, array_column($this->getRoles(), 'name'))) {
+                        $u = $this->userModel->findById($targetId); if ($u) { $u['role'] = $action; $this->userModel->save($u); }
+                    }
                 }
                 $this->writeLog($currentUser, 'Batch Action', "Action: {$action}");
                 if (!empty($skipMsg)) {
@@ -2100,8 +2307,13 @@ JS;
                 elseif ($sort === 'name') { $valA = $a['name']; $valB = $b['name']; }
                 elseif ($sort === 'grade') { $valA = $a['_grade']; $valB = $b['_grade']; }
                 elseif ($sort === 'role') {
-                    $roles = ['admin'=>1, 'special'=>2, 'general'=>3];
-                    $valA = $roles[$a['role']] ?? 99; $valB = $roles[$b['role']] ?? 99;
+                    $allRoles = $this->getRoles();
+                    $roleOrder = [];
+                    foreach ($allRoles as $idx => $r) {
+                        $roleOrder[$r['name']] = $idx + 1;
+                    }
+                    $valA = $roleOrder[$a['role']] ?? 99;
+                    $valB = $roleOrder[$b['role']] ?? 99;
                 }
                 elseif ($sort === 'status') { $valA = $a['_status']; $valB = $b['_status']; }
                 elseif ($sort === 'registered') { $valA = $a['_index']; $valB = $b['_index']; }
@@ -2120,7 +2332,13 @@ JS;
             
             echo "<section aria-labelledby='user-list-title'><h2 id='user-list-title' style='font-size:1.2rem;'>ユーザー一覧</h2><form method='POST'>";
             echo "<div style='display:flex; justify-content:space-between; margin-bottom:10px; align-items:center;'>";
-            echo "<div><select name='batch_action' required style='width:auto;'><option value=''>-- 選択 --</option><option value='admin'>管理者にする</option><option value='special'>特別部員にする</option><option value='general'>一般部員にする</option><option value='lock'>アカウントを一時停止する</option><option value='unlock'>アカウントの停止を解除する</option><option value='delete'>削除する</option></select> <button type='submit' class='btn'>一括適用</button></div>";
+            echo "<div><select name='batch_action' required style='width:auto;'><option value=''>-- 選択 --</option>";
+            $allRoles = $this->getRoles();
+            foreach ($allRoles as $roleItem) {
+                $roleName = htmlspecialchars($roleItem['name']);
+                echo "<option value='{$roleName}'>ロールを「{$roleName}」に変更</option>";
+            }
+            echo "<option value='lock'>アカウントを一時停止する</option><option value='unlock'>アカウントの停止を解除する</option><option value='delete'>削除する</option></select> <button type='submit' class='btn'>一括適用</button></div>";
             echo "<div style='font-size:0.9em; color:#666;'>全 {$total} 件中 ".(($p-1)*$perPage+1)." - ".min($total, $p*$perPage)." 件を表示</div>";
             echo "</div>";
             
@@ -2145,7 +2363,7 @@ JS;
             echo "</section></main></body></html>"; return;
         }
 
-        if ($path === 'cms/users/edit' && $currentUser['role'] === 'admin') {
+        if ($path === 'cms/users/edit' && $this->userHasPermission($currentUser, 'users_edit')) {
             $id = $_GET['id'] ?? '';
             $formData = ['id' => '', 'student_id' => '', 'name' => '', 'email' => '', 'grade' => '', 'role' => 'general'];
             
@@ -2209,9 +2427,13 @@ JS;
             echo "<label>メールアドレス</label><input type='email' name='email' value='".htmlspecialchars($formData['email'] ?? '')."'>";
             echo "<label>学年（空欄の場合は自動計算）</label><input type='text' name='grade' value='".htmlspecialchars($formData['grade'] ?? '')."'>";
             echo "<label>権限</label><select name='role' required>";
-            echo "<option value='general' ".(($formData['role'] === 'general')?'selected':'').">一般部員</option>";
-            echo "<option value='special' ".(($formData['role'] === 'special')?'selected':'').">特別部員</option>";
-            echo "<option value='admin' ".(($formData['role'] === 'admin')?'selected':'').">管理者</option>";
+            $roles = $this->getRoles();
+            $canChangeRole = $this->userHasPermission($currentUser, 'users_role_change');
+            foreach ($roles as $r) {
+                $sel = ($formData['role'] === $r['name']) ? 'selected' : '';
+                $disabled = (!$canChangeRole && $r['name'] !== $formData['role']) ? 'disabled' : '';
+                echo "<option value='".htmlspecialchars($r['name'])."' {$sel} {$disabled}>".htmlspecialchars($r['name'])."</option>";
+            }
             echo "</select>";
             echo "<label>パスワード " . ($id ? "(変更する場合のみ入力)" : "<span style='color:red;'>*</span>") . "</label>";
             echo "<input type='password' name='password' " . ($id ? "" : "required") . ">";
@@ -2222,7 +2444,7 @@ JS;
             return;
         }
 
-        if ($path === 'cms/users/csv_upload' && $currentUser['role'] === 'admin') {
+        if ($path === 'cms/users/csv_upload' && $this->userHasPermission($currentUser, 'users_csv_import')) {
             if ($method === 'POST' && isset($_FILES['csv_file'])) {
                 $file = $_FILES['csv_file'];
                 if ($file['error'] === UPLOAD_ERR_OK) {
@@ -2248,7 +2470,7 @@ JS;
             $this->renderErrorPage(400, $baseUrl, "CSVファイルのアップロードに失敗しました。", $adminHead);
         }
 
-        if ($path === 'cms/users/csv_map' && $currentUser['role'] === 'admin') {
+        if ($path === 'cms/users/csv_map' && $this->userHasPermission($currentUser, 'users_csv_import')) {
             if (!isset($_SESSION['csv_import_data'])) { header("Location: {$baseUrl}cms/users"); exit; }
             $csvData = $_SESSION['csv_import_data'];
             $firstRow = $csvData[0];
@@ -2278,7 +2500,8 @@ JS;
                     $grade = ($map['grade'] !== '' && isset($row[$map['grade']])) ? trim($row[$map['grade']]) : '';
                     $password = ($map['password'] !== '' && isset($row[$map['password']])) ? trim($row[$map['password']]) : '';
 
-                    if (!in_array($role, ['admin', 'special', 'general'])) $role = $defaultRole;
+                    $allRoleNames = array_column($this->getRoles(), 'name');
+                    if (!in_array($role, $allRoleNames)) $role = $defaultRole;
                     
                     $existing = array_filter($this->userModel->getAll(), function($u) use ($studentId) { return $u['student_id'] === $studentId; });
                     $existingUser = reset($existing);
@@ -2327,7 +2550,13 @@ JS;
 
             echo "<div style='background:#e9ecef; padding:15px; border-radius:4px; margin-bottom:20px;'>";
             echo "<label for='default_role'>CSVに権限データがない場合のデフォルト権限:</label><br>";
-            echo "<select id='default_role' name='default_role' style='width:auto;'><option value='general'>一般部員</option><option value='special'>特別部員</option><option value='admin'>管理者</option></select></div>";
+            echo "<select id='default_role' name='default_role' style='width:auto;'>";
+            $allRoles = $this->getRoles();
+            foreach ($allRoles as $r) {
+                $sel = ($defaultRole === $r['name']) ? 'selected' : '';
+                echo "<option value='".htmlspecialchars($r['name'])."' {$sel}>".htmlspecialchars($r['name'])."</option>";
+            }
+            echo "</select></div>";
 
             echo "<div style='background:#e2e3e5; padding:15px; border-radius:4px; margin-bottom:20px; border:1px solid #d6d8db;'>";
             echo "<label style='font-weight:bold;'>【新規登録】パスワード列を割り当てない（またはセルが空欄）場合の自動設定:</label><br>";
@@ -2340,7 +2569,7 @@ JS;
                 'student_id' => ['label' => '学籍番号/ID (必須)', 'required' => true],
                 'name' => ['label' => '名前', 'required' => false],
                 'email' => ['label' => 'メールアドレス', 'required' => false],
-                'role' => ['label' => '権限 (admin/special/general)', 'required' => false],
+                'role' => ['label' => '権限（任意のロール名）', 'required' => false],
                 'grade' => ['label' => '学年 (任意)', 'required' => false],
                 'password' => ['label' => 'パスワード (任意)', 'required' => false]
             ];
@@ -2363,9 +2592,207 @@ JS;
         }
 
         // ==========================================
+        // 権限管理（ロール定義）
+        // ==========================================
+        if ($path === 'cms/roles' && $this->userHasPermission($currentUser, 'roles_manage')) {
+            $roles = $this->getRoles();
+            $allPermissions = ['blogs_view','blogs_create','blogs_edit_all','blogs_delete','blogs_edit_request','blogs_draft','blogs_revisions','pages_manage','files_upload','files_upload_unrestricted','files_delete_any','users_view','users_create','users_edit','users_delete','users_csv_import','users_role_change','settings_mail','settings_2fa','settings_site','logs_view','backups_manage','roles_manage','assets_manage','categories_manage','templates_manage'];
+
+            if ($method === 'POST') {
+                if (isset($_POST['delete_role'])) {
+                    $roles = array_filter($roles, function($r) { return $r['name'] !== $_POST['delete_role']; });
+                    $roles = array_values($roles);
+                    $this->saveRoles($roles);
+                    $_SESSION['flash_message'] = 'ロールを削除しました。';
+                } elseif (isset($_POST['permissions'])) {
+                    $roleName = trim($_POST['role_name'] ?? '');
+                    if ($roleName === '') {
+                        $_SESSION['flash_error'] = 'ロール名は必須です。';
+                    } else {
+                        $permissions = $_POST['permissions'] ?? [];
+                        // adminロールは常に全権限を強制
+                        if ($roleName === 'admin') {
+                            $allPerms = ['blogs_view','blogs_create','blogs_edit_all','blogs_delete','blogs_edit_request','blogs_draft','blogs_revisions','pages_manage','files_upload','files_upload_unrestricted','files_delete_any','users_view','users_create','users_edit','users_delete','users_csv_import','users_role_change','settings_mail','settings_2fa','settings_site','logs_view','backups_manage','roles_manage','assets_manage','categories_manage','templates_manage'];
+                            $permissions = $allPerms;
+                        }
+                        // 依存関係チェック
+                        $deps = [
+                            'blogs_create' => ['blogs_view'],
+                            'blogs_edit_all' => ['blogs_view'],
+                            'blogs_delete' => ['blogs_view'],
+                            'blogs_edit_request' => ['blogs_view'],
+                            'blogs_draft' => ['blogs_create'],
+                            'blogs_revisions' => ['blogs_view'],
+                            'files_upload_unrestricted' => ['files_upload'],
+                            'files_delete_any' => ['files_upload'],
+                            'users_create' => ['users_view'],
+                            'users_edit' => ['users_view'],
+                            'users_delete' => ['users_view'],
+                            'users_csv_import' => ['users_create'],
+                            'users_role_change' => ['users_edit'],
+                        ];
+                        $valid = true;
+                        foreach ($permissions as $p) {
+                            if (isset($deps[$p])) {
+                                foreach ($deps[$p] as $dep) {
+                                    if (!in_array($dep, $permissions)) {
+                                        $valid = false;
+                                        break 2;
+                                    }
+                                }
+                            }
+                        }
+                        if (!$valid) {
+                            $_SESSION['flash_error'] = '依存する権限が不足しているため保存できません。';
+                        } else {
+                            $existingIndex = null;
+                            foreach ($roles as $i => $r) {
+                                if ($r['name'] === $roleName) { $existingIndex = $i; break; }
+                            }
+                            $protected = ($existingIndex !== null && !empty($roles[$existingIndex]['protected']));
+                            $roleData = ['name' => $roleName, 'permissions' => $permissions];
+                            if ($protected) {
+                                $roleData['protected'] = true;
+                            }
+                            if ($existingIndex !== null) {
+                                $roles[$existingIndex] = $roleData;
+                            } else {
+                                $roles[] = $roleData;
+                            }
+                            $this->saveRoles($roles);
+                            $_SESSION['flash_message'] = 'ロールを保存しました。';
+                        }
+                    }
+                }
+                header("Location: {$baseUrl}cms/roles"); exit;
+            }
+
+            echo $adminHead . "<h1>権限管理（ロール設定）</h1>";
+            echo "<table><thead><tr><th>ロール名</th>";
+            foreach ($allPermissions as $p) {
+                echo "<th style='writing-mode: vertical-rl;'>".htmlspecialchars($p)."</th>";
+            }
+            echo "<th>操作</th></tr></thead><tbody>";
+
+            foreach ($roles as $role) {
+                echo "<tr>";
+                echo "<td><strong>".htmlspecialchars($role['name'])."</strong></td>";
+                foreach ($allPermissions as $p) {
+                    $checked = in_array($p, $role['permissions']) ? '✓' : '';
+                    echo "<td style='text-align:center;'>".$checked."</td>";
+                }
+                echo "<td><a href='{$baseUrl}cms/roles/edit?name=".urlencode($role['name'])."' class='btn' style='padding:4px 8px;'>編集</a> ";
+                if (empty($role['protected'])) {
+                    echo "<form method='POST' style='display:inline;' onsubmit='return confirm(\"ロールを削除しますか？\");'><input type='hidden' name='delete_role' value='".htmlspecialchars($role['name'])."'><button type='submit' class='btn' style='background:#dc3545; padding:4px 8px;'>削除</button></form>";
+                }
+                echo "</td>";
+                echo "</tr>";
+            }
+            echo "</tbody></table>";
+
+            echo "<a href='{$baseUrl}cms/roles/edit' class='btn' style='background:#28a745;'>＋ 新規ロール作成</a>";
+            echo "</main></body></html>";
+            return;
+        }
+
+        if ($path === 'cms/roles/edit' && $this->userHasPermission($currentUser, 'roles_manage')) {
+            $roleName = $_GET['name'] ?? '';
+            $roles = $this->getRoles();
+            $role = null;
+            if ($roleName !== '') {
+                foreach ($roles as $r) { if ($r['name'] === $roleName) { $role = $r; break; } }
+            }
+            $role = $role ?? ['name' => '', 'permissions' => [], 'protected' => false];
+            $isProtected = !empty($role['protected']);
+            $isAdmin = ($roleName === 'admin');
+            $allPermissions = ['blogs_view','blogs_create','blogs_edit_all','blogs_delete','blogs_edit_request','blogs_draft','blogs_revisions','pages_manage','files_upload','files_upload_unrestricted','files_delete_any','users_view','users_create','users_edit','users_delete','users_csv_import','users_role_change','settings_mail','settings_2fa','settings_site','logs_view','backups_manage','roles_manage','assets_manage','categories_manage','templates_manage'];
+            $dependencies = [
+                'blogs_create' => ['blogs_view'],
+                'blogs_edit_all' => ['blogs_view'],
+                'blogs_delete' => ['blogs_view'],
+                'blogs_edit_request' => ['blogs_view'],
+                'blogs_draft' => ['blogs_create'],
+                'blogs_revisions' => ['blogs_view'],
+                'files_upload_unrestricted' => ['files_upload'],
+                'files_delete_any' => ['files_upload'],
+                'users_create' => ['users_view'],
+                'users_edit' => ['users_view'],
+                'users_delete' => ['users_view'],
+                'users_csv_import' => ['users_create'],
+                'users_role_change' => ['users_edit'],
+            ];
+
+            echo $adminHead . "<h1>ロール編集</h1>";
+            echo "<form method='POST' action='{$baseUrl}cms/roles' id='role-edit-form'>";
+            echo "<input type='hidden' name='role_name' value='".htmlspecialchars($role['name'])."'>";
+            echo "<label>ロール名: <input type='text' name='role_name' value='".htmlspecialchars($role['name'])."' ".($isProtected ? 'readonly' : 'required')."></label>";
+            if ($isAdmin) {
+                echo "<p><strong>adminロールは常にすべての権限を持ち、変更できません。</strong></p>";
+            }
+            echo "<fieldset><legend>権限設定</legend>";
+            echo "<table><tr><th>権限</th><th>許可</th></tr>";
+            foreach ($allPermissions as $p) {
+                $checked = ($isAdmin || in_array($p, $role['permissions'])) ? 'checked' : '';
+                $disabled = $isAdmin ? 'disabled' : '';
+                $depAttr = '';
+                if (!$isAdmin && isset($dependencies[$p])) {
+                    $depList = json_encode($dependencies[$p]);
+                    $depAttr = " data-depends='".htmlspecialchars($depList, ENT_QUOTES)."'";
+                }
+                echo "<tr><td>".htmlspecialchars($p)."</td><td><input type='checkbox' name='permissions[]' value='".htmlspecialchars($p)."' {$checked} {$disabled}{$depAttr}></td></tr>";
+            }
+            echo "</table></fieldset>";
+            echo "<button type='submit' class='btn'>保存</button> ";
+            echo "<a href='{$baseUrl}cms/roles' class='btn' style='background:#6c757d;'>戻る</a>";
+            echo "</form>";
+
+            echo <<<JS
+<script>
+(function() {
+    const form = document.getElementById('role-edit-form');
+    const checkboxes = form.querySelectorAll('input[type="checkbox"]');
+    const map = {};
+    checkboxes.forEach(cb => {
+        const name = cb.value;
+        map[name] = cb;
+        if (cb.dataset.depends) {
+            cb._deps = JSON.parse(cb.dataset.depends);
+        }
+    });
+    function updateDeps() {
+        checkboxes.forEach(cb => {
+            // 依存関係を持つチェックボックスのみ制御
+            if (!cb._deps) return;
+            let allOk = true;
+            for (let d of cb._deps) {
+                if (map[d] && !map[d].checked) {
+                    allOk = false;
+                    break;
+                }
+            }
+            if (!allOk) {
+                cb.checked = false;
+                cb.disabled = true;
+            } else {
+                cb.disabled = false; // 依存条件が満たされたら有効化
+            }
+        });
+    }
+    checkboxes.forEach(cb => {
+        cb.addEventListener('change', updateDeps);
+    });
+    updateDeps();
+})();
+</script>
+JS;
+            echo "</main></body></html>";
+            return;
+        }
+
+        // ==========================================
         // カテゴリ管理
         // ==========================================
-        if ($path === 'cms/categories' && $isAdminOrSpecial) {
+        if ($path === 'cms/categories' && $this->userHasPermission($currentUser, 'categories_manage')) {
             if ($method === 'POST') {
                 if (isset($_POST['delete_id'])) {
                     $this->contentModel->deleteCategory($_POST['delete_id']);
@@ -2402,7 +2829,7 @@ JS;
         // ==========================================
         // システム設定・テンプレート
         // ==========================================
-        if ($path === 'cms/templates' && $isAdminOrSpecial) {
+        if ($path === 'cms/templates' && $this->userHasPermission($currentUser, 'templates_manage')) {
             if ($method === 'POST') {
                 $this->templateModel->save('header.html', $_POST['header']);
                 $this->templateModel->save('footer.html', $_POST['footer']);
@@ -2421,7 +2848,7 @@ JS;
                 $newSettings['blog_item_list_layout'] = $_POST['blog_item_list_layout'] ?? '';
                 $newSettings['blog_item_card_layout'] = $_POST['blog_item_card_layout'] ?? '';
                 
-                if ($currentUser['role'] === 'admin') {
+                if ($this->userHasPermission($currentUser, 'settings_site')) {
                     $newSettings['backup_retention_count'] = (int)($_POST['backup_retention_count'] ?? 10);
                     $newSettings['log_max_lines'] = (int)($_POST['log_max_lines'] ?? 1000);
                     $newSettings['blog_category_enabled'] = !empty($_POST['blog_category_enabled']);
@@ -2431,17 +2858,10 @@ JS;
                     $newSettings['site_search_enabled'] = !empty($_POST['site_search_enabled']);
                     $newSettings['blog_date_type'] = $_POST['blog_date_type'] ?? 'updated_at';
                     
-                    $newSettings['allow_user_email_change'] = !empty($_POST['allow_user_email_change']);
-                    $newSettings['allow_member_revisions'] = !empty($_POST['allow_member_revisions']);
-                    $newSettings['notify_edit_request'] = !empty($_POST['notify_edit_request']);
-                    $newSettings['allow_blog_draft'] = !empty($_POST['allow_blog_draft']);
-                    $newSettings['blog_edit_policy'] = $_POST['blog_edit_policy'] ?? 'only_own';
-                    
                     $newSettings['blog_list_mode'] = $_POST['blog_list_mode'] ?? 'list';
                     $newSettings['blog_thumbnail_required'] = !empty($_POST['blog_thumbnail_required']);
                     $newSettings['blog_default_thumbnail'] = $_POST['blog_default_thumbnail'] ?? '';
                     
-                    $newSettings['upload_allow_general'] = !empty($_POST['upload_allow_general']);
                     $newSettings['upload_allowed_exts'] = trim($_POST['upload_allowed_exts'] ?? 'jpg, jpeg, png, gif, webp, pdf, zip, txt');
                     $newSettings['upload_max_mb'] = (float)($_POST['upload_max_mb'] ?? 5);
                     $newSettings['upload_webp_enable'] = !empty($_POST['upload_webp_enable']);
@@ -2458,33 +2878,18 @@ JS;
             echo $adminHead . "<h1>システム設定・テンプレート管理</h1>";
             echo "<form id='edit-form' method='POST'>";
             
-            if ($currentUser['role'] === 'admin') {
-                echo "<fieldset><legend>ブログ・全体機能拡張 (管理者のみ)</legend>";
+            if ($this->userHasPermission($currentUser, 'settings_site')) {
+                echo "<fieldset><legend>サイト全体設定</legend>";
                 echo "<label><input type='checkbox' name='site_search_enabled' value='1' ".(!empty($settings['site_search_enabled'])?'checked':'')."> サイト内全体検索機能を有効にする</label><br><br>";
-                echo "<label><input type='checkbox' name='allow_user_email_change' value='1' ".(!empty($settings['allow_user_email_change'])?'checked':'')."> 一般ユーザーによる自身のメールアドレス変更を許可する</label><br>";
-                echo "<label><input type='checkbox' name='allow_member_revisions' value='1' ".(!empty($settings['allow_member_revisions'])?'checked':'')."> 一般・特別部員にも記事の変更履歴(リビジョン)復元機能の利用を許可する</label><br>";
-                echo "<label><input type='checkbox' name='notify_edit_request' value='1' ".(!empty($settings['notify_edit_request'])?'checked':'')."> 編集リクエストがあった場合に管理者にメール通知する</label><br><br>";
-                
-                echo "<label><input type='checkbox' name='allow_blog_draft' value='1' ".(!empty($settings['allow_blog_draft'])?'checked':'')."> 一般部員・特別部員にもブログの下書き(非公開)保存を許可する</label><br><br>";
-
                 echo "<label><input type='checkbox' name='blog_category_enabled' value='1' ".(!empty($settings['blog_category_enabled'])?'checked':'')."> カテゴリ機能を有効にする</label><br>";
                 echo "<label><input type='checkbox' name='blog_category_required' value='1' ".(!empty($settings['blog_category_required'])?'checked':'')."> 記事作成時にカテゴリ付けを必須にする</label><br><br>";
                 echo "<label><input type='checkbox' name='blog_tag_enabled' value='1' ".(!empty($settings['blog_tag_enabled'])?'checked':'')."> タグ機能を有効にする</label><br><br>";
-                
                 $dt = $settings['blog_date_type'] ?? 'updated_at';
                 echo "<label>ブログの基準日時: <select name='blog_date_type' style='width:auto; display:inline-block;'><option value='updated_at' ".($dt==='updated_at'?'selected':'').">更新日時</option><option value='created_at' ".($dt==='created_at'?'selected':'').">作成日時</option></select></label><br><br>";
                 echo "<label>最新記事として独立表示する件数: <input type='number' name='blog_latest_count' value='".htmlspecialchars($settings['blog_latest_count'] ?? 5)."' min='1' max='50' style='width:80px; display:inline-block;'></label><br><br>";
-                
-                $blogEditPolicy = $settings['blog_edit_policy'] ?? 'only_own';
-                echo "<label>一般部員のブログ編集権限: <select name='blog_edit_policy' style='width:auto; display:inline-block;'>";
-                echo "<option value='only_own' ".($blogEditPolicy==='only_own'?'selected':'').">自身が作成した記事のみ編集・削除可能 (デフォルト)</option>";
-                echo "<option value='all' ".($blogEditPolicy==='all'?'selected':'').">誰の記事でも編集・削除可能</option>";
-                echo "<option value='allowed_only' ".($blogEditPolicy==='allowed_only'?'selected':'').">自身作成 ＋ 許可された記事のみ編集・削除可能 (リクエスト機能あり)</option>";
-                echo "</select></label>";
-                
                 echo "</fieldset>";
 
-                echo "<fieldset><legend>ブログ一覧のデザイン・サムネイル設定 (管理者のみ)</legend>";
+                echo "<fieldset><legend>ブログ一覧のデザイン・サムネイル設定</legend>";
                 $listMode = $settings['blog_list_mode'] ?? 'list';
                 echo "<label>ブログ一覧の表示形式: <select name='blog_list_mode' style='width:auto; display:inline-block;'>";
                 echo "<option value='list' ".($listMode==='list'?'selected':'').">リスト型 (シンプル)</option>";
@@ -2495,8 +2900,7 @@ JS;
                 echo "<input type='text' name='blog_default_thumbnail' value='".htmlspecialchars($settings['blog_default_thumbnail'] ?? '')."' placeholder='{$baseUrl}assets/default.png'>";
                 echo "</fieldset>";
 
-                echo "<fieldset><legend>ファイルアップロード・画像設定 (管理者のみ)</legend>";
-                echo "<label><input type='checkbox' name='upload_allow_general' value='1' ".(!empty($settings['upload_allow_general'])?'checked':'')."> 一般ユーザー(特別部員・一般部員)のファイルアップロードを許可する</label><br><br>";
+                echo "<fieldset><legend>ファイルアップロード・画像設定</legend>";
                 echo "<label>許可する拡張子 (カンマ区切り)</label>";
                 echo "<input type='text' name='upload_allowed_exts' value='".htmlspecialchars($settings['upload_allowed_exts'] ?? 'jpg, jpeg, png, gif, webp, pdf, zip, txt')."'>";
                 echo "<label>最大ファイルサイズ (MB)</label>";
@@ -2508,7 +2912,7 @@ JS;
                 echo "<input type='number' name='upload_webp_quality' value='".htmlspecialchars($settings['upload_webp_quality'] ?? 80)."' min='1' max='100'>";
                 echo "</fieldset>";
 
-                echo "<fieldset><legend>システム保存設定 (管理者のみ)</legend>";
+                echo "<fieldset><legend>システム保存設定</legend>";
                 echo "<label>自動バックアップ保存件数</label><input type='number' name='backup_retention_count' value='".htmlspecialchars($settings['backup_retention_count'] ?? 10)."' min='0' step='1'>";
                 echo "<label>システムログ保存行数</label><input type='number' name='log_max_lines' value='".htmlspecialchars($settings['log_max_lines'] ?? 1000)."' min='0' step='1'>";
                 echo "</fieldset>";
@@ -2685,20 +3089,7 @@ HTML;
             if ($id) {
                 $content = $this->contentModel->getById($id);
                 if ($content) {
-                    $canDelete = false;
-                    if ($isAdminOrSpecial) {
-                        $canDelete = true;
-                    } else {
-                        $policy = $settings['blog_edit_policy'] ?? 'only_own';
-                        if ($content['author_id'] === $currentUser['id']) {
-                            $canDelete = true;
-                        } elseif ($policy === 'all') {
-                            $canDelete = true;
-                        } elseif ($policy === 'allowed_only') {
-                            $allowed = $content['allowed_editors'] ?? [];
-                            if (in_array($currentUser['id'], $allowed)) $canDelete = true;
-                        }
-                    }
+                    $canDelete = $this->userHasPermission($currentUser, 'blogs_delete') || ($content['author_id'] === $currentUser['id']);
 
                     if (!$canDelete) {
                         $_SESSION['flash_error'] = "この記事を削除する権限がありません。";
@@ -2717,11 +3108,8 @@ HTML;
             exit;
         }
 
-        if ($path === 'cms/pages') {
-            if (!$isAdminOrSpecial) {
-                $_SESSION['flash_error'] = "通常ページ管理の権限がありません。";
-                header("Location: {$baseUrl}cms/dashboard"); exit;
-            }
+        if ($path === 'cms/pages' && $this->userHasPermission($currentUser, 'pages_manage')) {
+            // 権限チェックは不要（すでに通過）
 
             echo $adminHead . "<h1>通常ページ管理</h1>";
             echo "<p style='font-size:0.9em;color:#666;margin-top:-10px;'>※スラッグを <code>404</code> や <code>403</code> などのステータスコードにすると、システムのエラーページとして自動的に使われます。</p>";
@@ -2839,7 +3227,7 @@ HTML;
             return;
         }
 
-        if ($path === 'cms/blogs_admin') {
+        if ($path === 'cms/blogs_admin' && $this->userHasPermission($currentUser, 'blogs_view')) {
             echo $adminHead . "<h1>ブログ記事管理</h1>";
             
             $q = trim($_GET['q'] ?? '');
@@ -2893,7 +3281,9 @@ HTML;
             echo "<div><button type='submit' class='btn'>適用</button> ";
             if ($q || isset($_GET['sort'])) echo "<a href='{$baseUrl}cms/blogs_admin' style='margin-left:10px;'>クリア</a>";
             echo "</div>";
-            echo "<div style='margin-left:auto;'><a href='{$baseUrl}cms/contents/edit?type=blog' class='btn' style='background:#28a745;'>+ ブログを新規作成</a></div>";
+            if ($this->userHasPermission($currentUser, 'blogs_create')) {
+                echo "<div style='margin-left:auto;'><a href='{$baseUrl}cms/contents/edit?type=blog' class='btn' style='background:#28a745;'>+ ブログを新規作成</a></div>";
+            }
             echo "</form>";
 
             echo "<div style='font-size:0.9em; color:#666; margin-bottom:10px;'>全 {$total} 件中 ".(($p-1)*$perPage+1)." - ".min($total, $p*$perPage)." 件を表示</div>";
@@ -2914,27 +3304,14 @@ HTML;
 
                 echo "<tr>";
                 echo "<td>{$statusLabel}</td>";
-                echo "<td><a href='{$baseUrl}blog/" . htmlspecialchars($b['slug'] ?? '') . "' target='_blank' style='font-weight:bold;text-decoration:none;color:#0056b3;'>" . htmlspecialchars($b['title']) . " ↗</a></td>";
+                echo "<td><a href='{$baseUrl}blog/" . urlencode($b['slug'] ?? '') . "' target='_blank' style='font-weight:bold;text-decoration:none;color:#0056b3;'>" . htmlspecialchars($b['title']) . " ↗</a></td>";
                 echo "<td>" . htmlspecialchars($authorName) . "</td>";
                 echo "<td style='font-size:0.9em;'>作: {$cDate}<br>更: {$uDate}</td>";
                 echo "<td style='font-size:0.9em;'>カ: ".htmlspecialchars($cName)."<br>タ: ".htmlspecialchars($tags)."</td>";
                 
                 echo "<td><a href='{$baseUrl}cms/contents/edit?id=".urlencode($b['id'])."' class='btn' style='padding:5px 10px; font-size:0.9em; margin-right:5px;'>編集</a>";
                 
-                $canDelete = false;
-                if ($isAdminOrSpecial) {
-                    $canDelete = true;
-                } else {
-                    $policy = $settings['blog_edit_policy'] ?? 'only_own';
-                    if ($b['author_id'] === $currentUser['id']) {
-                        $canDelete = true;
-                    } elseif ($policy === 'all') {
-                        $canDelete = true;
-                    } elseif ($policy === 'allowed_only') {
-                        $allowed = $b['allowed_editors'] ?? [];
-                        if (in_array($currentUser['id'], $allowed)) $canDelete = true;
-                    }
-                }
+                $canDelete = $this->userHasPermission($currentUser, 'blogs_delete') || ($b['author_id'] === $currentUser['id']);
                 
                 if ($canDelete) {
                     echo "<form action='{$baseUrl}cms/contents/delete' method='POST' style='display:inline;' onsubmit='return confirm(\"本当に削除しますか？\")'><input type='hidden' name='id' value='".htmlspecialchars($b['id'])."'><input type='hidden' name='return_to' value='cms/blogs_admin'><button type='submit' class='btn' style='background:#dc3545; padding:5px 10px; font-size:0.9em;'>削除</button></form>";
@@ -3001,7 +3378,7 @@ HTML;
         // ==========================================
         if ($path === 'cms/contents/revisions') {
             $id = $_GET['id'] ?? '';
-            $allowRevisions = ($currentUser['role'] === 'admin') || !empty($settings['allow_member_revisions']);
+            $allowRevisions = $this->userHasPermission($currentUser, 'blogs_revisions');
             if (!$allowRevisions || !$id) {
                 $this->renderErrorPage(403, $baseUrl, "権限がないか、記事が指定されていません。", $adminHead);
             }
@@ -3046,7 +3423,7 @@ HTML;
         if ($path === 'cms/contents/restore' && $method === 'POST') {
             $id = $_POST['id'] ?? '';
             $version = $_POST['version'] ?? '';
-            $allowRevisions = ($currentUser['role'] === 'admin') || !empty($settings['allow_member_revisions']);
+            $allowRevisions = $this->userHasPermission($currentUser, 'blogs_revisions');
             
             if ($allowRevisions && $id && $version) {
                 $revData = $this->contentModel->getRevision($id, $version);
@@ -3094,26 +3471,21 @@ HTML;
                 } elseif ($id) {
                     $existingData = $this->contentModel->getById($id);
                     if ($existingData) {
-                        if (!$isAdminOrSpecial) {
-                            $policy = $settings['blog_edit_policy'] ?? 'only_own';
+                        if (!$this->userHasPermission($currentUser, 'blogs_edit_all')) {
                             $canEdit = false;
                             if ($existingData['author_id'] === $currentUser['id']) {
                                 $canEdit = true;
-                            } elseif ($policy === 'all') {
-                                $canEdit = true;
-                            } elseif ($policy === 'allowed_only') {
+                            } else {
                                 $allowed = $existingData['allowed_editors'] ?? [];
-                                if (in_array($currentUser['id'], $allowed)) $canEdit = true;
-                            }
-                            
-                            if (!$canEdit) {
-                                if ($policy === 'allowed_only') {
+                                if (in_array($currentUser['id'], $allowed)) {
+                                    $canEdit = true;
+                                } else {
                                     $_SESSION['flash_error'] = "この記事の編集権限がありません。";
                                     header("Location: {$baseUrl}cms/contents/request_edit?id={$id}"); exit;
-                                } else {
-                                    $_SESSION['flash_error'] = "他のユーザーの記事は編集できません。";
-                                    header("Location: {$baseUrl}cms/blogs_admin"); exit;
                                 }
+                            }
+                            if (!$canEdit) {
+                                // canEdit が true でなければすでにリダイレクト済み
                             }
                         }
                         $formData = array_merge($formData, $existingData);
@@ -3144,14 +3516,11 @@ HTML;
                 $existingData = $id ? $this->contentModel->getById($id) : null;
                 $formData['author_id'] = $existingData ? $existingData['author_id'] : $currentUser['id'];
 
-                if (!$isPage && !$isAdminOrSpecial && $existingData) {
-                    $policy = $settings['blog_edit_policy'] ?? 'only_own';
+                if (!$isPage && !$this->userHasPermission($currentUser, 'blogs_edit_all') && $existingData) {
                     $canEdit = false;
                     if ($existingData['author_id'] === $currentUser['id']) {
                         $canEdit = true;
-                    } elseif ($policy === 'all') {
-                        $canEdit = true;
-                    } elseif ($policy === 'allowed_only') {
+                    } else {
                         $allowed = $existingData['allowed_editors'] ?? [];
                         if (in_array($currentUser['id'], $allowed)) $canEdit = true;
                     }
@@ -3304,7 +3673,7 @@ HTML;
             
             echo "<label>公開状態</label><select name='status'>";
             echo "<option value='published' ".(($formData['status'] ?? 'published') === 'published' ? 'selected' : '').">公開</option>";
-            $allowDraft = $isPage ? true : ($currentUser['role'] === 'admin' || !empty($settings['allow_blog_draft']));
+            $allowDraft = $isPage ? true : $this->userHasPermission($currentUser, 'blogs_draft');
             if ($allowDraft || ($formData['status'] ?? 'published') === 'draft') {
                 echo "<option value='draft' ".(($formData['status'] ?? 'published') === 'draft' ? 'selected' : '').">下書き / 非公開</option>";
             }
